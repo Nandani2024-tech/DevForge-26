@@ -16,6 +16,7 @@ Stack: Python 3.10-3.12, pip, pytest. Run: `python main.py --input <dir> --outpu
 - Every word in a code or config word list needs a non-dev source (language, standard or schema, clinical vocabulary, OS). Never add a word because check_dev showed a leak or a false positive.
 - Fix a false positive or a miss by changing the rule (shape, context or run-time evidence), and add a test with an invented word, absent from dev/input, that proves the rule generalises.
 - Only Claude or the user, in review, edits tests/r22_vocab_allowlist.txt and the swap-test fixtures.
+- Word lists are frozen by tests/vocab_lock.json. Only Claude or the user changes the lock, in review, with a non-dev source for each word.
 - A guard test fails when its fixture is missing; it never returns early.
 - Read RAKSHA_SECRET only from the environment. If it is missing, exit non-zero. Never write, print, log or hash-and-store it.
 - Policy values come from config/policy.yaml. Other constants are named and live in one module.

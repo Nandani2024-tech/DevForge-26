@@ -89,3 +89,39 @@
 - Obsolete: per-file-only order decision for text in Pass 2; .hackathon/bench/acc_r11_r13.py is superseded by tests/test_acceptance_r11_r13.py
 - Lesson: an ambiguous value is decided by the strongest evidence in the run, not by a default
 ~~~
+~~~
+### D11 | 2026-11-27 02:56 | R9,R4,R6,R7,R8 | base64 decode-clean-re-encode: raw-first cleaning, structural Attachment, run-time names
+- Was: base64 left opaque to every cleaner (commit 6319c85); in the uncommitted first N4 round, guessed base64 replaced raw-text cleaning, any FHIR 'data' key counted as an attachment, and "Referral" was added to NAME_LABELS to catch the consent-form name (not committed)
+- Now: explicit base64 (Attachment = 'data' with a contentType sibling or an attachment parent; RFC 2397 data: URIs) is decoded, cleaned by the same text/JSON cleaners plus Pass 1 run-time name evidence, and re-encoded in its own variant; binary or unverifiable payloads become base64 of a placeholder with a reason code. A guessed plain-JSON decode runs only after raw-text cleaning, so it can only add redactions
+- Why: check_dev base64 channel 100% -> 0.0%, canaries 1/4 -> 0/4, leak 1.3% -> 0.4%, medical kept 4854/4855; 19/19 bundles R4B-valid with 0 unresolved references; the review found a bare Aadhaar leak (20/1,019 generated values) from the decode-first ordering and a dev-driven word addition, both fixed and guarded by tests/test_redaction_invariants.py and tests/test_vocab_lock.py
+- Trigger: ship
+- Obsolete: "Referral" in NAME_LABELS; is_fhir as an Attachment signal (both removed before commit)
+- Lesson: a decoding path may add redactions, never replace the detectors on the raw value
+~~~
+~~~
+### D12 | 2026-11-27 04:10 | R5 (R10,R12) | column meaning: header tokens no longer short-circuit the value-shape vote; address/age/run-time-name votes; adjacency promotion
+- Was: classify_csv_columns returned the header class whenever classify_header_tokens matched and voted only R6 ID shapes + PIN; "hospital" headers always PRESERVE_EXACT; JSON name parts only under parent_key == "name"; DD.MM.YYYY not parsed (commit fff7ed4)
+- Now: per-column vote over a capped sample (COLUMN_VOTE_SAMPLE_CAP) with R6 shapes, address-cue shapes, age shape and Pass 1 name evidence; "hospital" + ID suffix deferred to the vote; FREE_TEXT columns next to an address/PIN/district column promoted to HOUSE/LOCALITY/LANDMARK by shape; unknown-header MRN-shaped columns that vary per patient excluded as non-patient IDs (find_non_patient_mrn_cols); name parts under any name-token parent; [-/.] date separators
+- Why: mutated dev set (tools/mutate_dev.py) MRN 6.4% -> 0.0%, HOUSE 39.7% -> 0.0%, LOCALITY 36.9% -> 1.9%, LANDMARK 40.6% -> 0.0%, all 7 R5 types <= 2%; dev numbers unchanged (leak 0.4%, F0.5 0.96). NOT committed: /verify-commit BLOCKED on 3 over-redaction test failures (modifier-only names, cue-word addresses in notes)
+- Trigger: ship
+- Obsolete: the header-match early return in classify_csv_columns (removed in the working tree)
+- Lesson: let value shape overrule a weak header, but never let one cue word decide a value's meaning in free text
+~~~
+~~~
+### D13 | 2026-11-27 04:55 | R5,R22 | facility-word IDs and house abbreviations by value shape, not new word lists
+- Was: HOSPITAL_ID_ISSUER_WORDS {'hospital'} + is_hospital_id_tokens and HOUSE_ABBR_WORDS ('h.no.', ...) in wards/config.py (working tree of D12, not committed)
+- Now: a PRESERVE_EXACT header is overruled by the strict R6 ID vote when the cells are non-medical (is_r8_medical_value) and high-cardinality (COLUMN_ID_MIN_CARDINALITY_RATIO); "H.No."-style cues match a letter + next token whose join is in the locked _HOUSE_TOKENS ('hno')
+- Why: user decision 2026-11-27: no new word lists in config.py; both words came from the renamed practice set and the vocab lock flagged them. Mutated set unchanged (7 R5 types <= 2%), dev unchanged. NOT committed: /verify-commit BLOCKED (per-leaf vote with one value, 25x slowdown on large CSVs)
+- Trigger: user
+- Obsolete: HOSPITAL_ID_ISSUER_WORDS, is_hospital_id_tokens, HOUSE_ABBR_WORDS (already removed)
+- Lesson: when a fix needs a new word, look for the value shape or an already-locked word first
+~~~
+~~~
+### D14 | 2026-11-27 05:45 | R5,R20 | ID override decided once per column/key with a min-values + distinct-count rule
+- Was: the PRESERVE_EXACT -> ID vote ran per JSON leaf / per CSV row on one value (always 1 distinct of 1), and Pass 1 re-voted the 200-cell sample on every row (working tree of D13, not committed)
+- Now: decided once per column/key over all its values: needs >= COLUMN_ID_MIN_VALUES (2) values and distinct share >= COLUMN_ID_MIN_CARDINALITY_RATIO (0.5) or >= COLUMN_ID_MIN_DISTINCT (10) distinct values; a lone value keeps its header meaning; ties at exactly half go to the ID (privacy-first, user decision 2026-11-27, test_r5_tie_break_...). CSV slot priorities and non-evidence columns computed before the row loop
+- Why: JSON facility codes were redacted as MRN; 10k-row CSV 29.67 s -> 1.55 s (74d4590 1.10 s); tests 127/127; dev unchanged; mutated MRN 6.4% -> 0.0%, all 7 R5 types <= 2%. D12 and D13 ship in the same commit
+- Trigger: user
+- Obsolete: single-value resolve_id_slot_override calls in pipeline.py and slots.py (removed)
+- Lesson: a decision about a column is never made from one of its values
+~~~

@@ -1,44 +1,47 @@
-fix(R12,R13): decide text date order from run evidence, band valid ages
+feat(R5,R8): classify columns by value shape when headers are renamed
 
-A text whose dates never show a day above 12 was read day-first, so
-month-first notes lost their intervals and two shifts left the policy
-range. The order now comes from the strongest evidence in the run. An
-age outside the valid range is no longer banded or left raw: it gets
-the age placeholder, so no band can exclude the true age.
+Unknown or renamed headers and keys no longer hide PII: a capped
+per-column vote over value shape, address cues, age shape and run-time
+name evidence decides the column, and an ID-shaped column overrides a
+facility-style header only when its values are non-medical and
+high-cardinality. No word lists were added; every rule uses existing
+locked vocabulary or value shape.
 
 Changes:
-- dates: order vote counts, certain vs ambiguous date evidence, and a
-  resolver that takes the first source with a decisive vote
-- pipeline: per-text order from own dates, then dates of records
-  linked to the same patient, then files of the same export family,
-  day-first only without evidence
-- generalisation: signed and out-of-range ages become [AGE] in fields,
-  integers and free text; MIN/MAX valid age in config
-- cleanups: slots reuses the column name-word set, names reuses the
-  shared protect regex
-- tests: R11-R13 acceptance against dev truth (fails without the kit),
-  linked-record and export-family order, invalid ages
+- columns: shape/address/age/name-evidence vote, adjacent address-part
+  promotion, per-column ID override with min-values and distinct-count
+  rule, non-patient ID columns found by per-patient variation
+- slots: column slot priorities computed once per file, named slot
+  priority constants, JSON slots use per-key decisions only
+- pipeline: per-column and per-key decisions made before the row and
+  leaf loops in both passes; free-text keys skip address-shape checks
+- patterns, names: medical-value check built on the existing protect
+  mask; strict ID shape without the postal-code kind
+- dates: DD.MM.YYYY dates parsed and shifted with their format kept
+- config: named voting, cardinality and slot-priority constants
+- tests: renamed-header, over-redaction, tie-break, per-column call
+  count and whole-pipeline scaling cases with invented values
 
 Verification:
-- tests: 84/84 pass
-- acceptance: claims in record 681/681; multi-date records with exact
-  intervals 339/339; shifts outside policy 0; age bands excluding the
-  true age 0/447
-- check_dev: leak 1.3%, PIN 0.0%, MRN 1.1%, medical kept 100.0%,
-  F0.5 0.96, wrong merges 0 (unchanged); records.jsonl byte-identical
-- validate_output: CONTRACT OK; check_submission --run: READY TO SUBMIT
-- hardcode-check: WARN (inline date-order keys in one function)
-- complexity-audit: PASS (linear; dev run 1.74 s, 25.36 MB peak RSS)
+- tests: 127/127 pass
+- dev: leak 0.4%, canaries 0/4, medical kept 4854/4855, F0.5 0.96,
+  0 wrong merges (unchanged)
+- renamed-header set: MRN 6.4% -> 0.0%, HOUSE 39.7% -> 0.0%, LOCALITY
+  36.9% -> 1.9%, LANDMARK 40.6% -> 0.0%, PATIENT_NAME 3.5% -> 1.8%
+- hardcode-check: WARN (column sample built in 3 places)
+- complexity-audit: PASS (CSV 1k/10k/50k rows 0.20/1.55/12.46 s,
+  linear)
 - ui-ux-review: n/a
 
-Replaces: per-file-only text date order -> run-wide evidence order;
-raw or clamped invalid ages -> age placeholder: R12 338/339 -> 339/339,
-R13 1 -> 0 bands excluding the true age
+Replaces:
+- header match short-circuiting the shape vote, and per-value override
+  decisions -> per-column/per-key vote with a cardinality rule: renamed
+  headers leaked IDs and addresses, per-value votes redacted codes
 
 Known debt:
-- date-order vote keys inlined as 'dmy'/'mdy' in the pipeline
-- an age range field such as "45-50" is written as "45-49-50"
+- capped column sample is built separately in 3 places
+- 10k-row CSV is about 1.4x slower than before (more ID columns found)
 
-Refs: R12, R13, D10
+Refs: R5, R8, D12, D13, D14
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
