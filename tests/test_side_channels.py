@@ -22,15 +22,15 @@ def test_r17_no_pii_or_secret_in_side_channels(tmp_path: Path, repo_root: Path) 
     pii_tokens = [
         "CanaryPerson",
         "9876543210",
-        "8265 7330 7111",
+        "4123 4567 8901",
         "ABCDE1234F",
         "canary.user@example.org",
-        "RampurKalan",
+        "TarapurKalan",
         "top-secret-fixture-key",
     ]
     (folder / "visit_01.csv").write_text(
         "UHID,Patient Name,Village,Phone,Aadhaar,PAN,Email\n"
-        "CLI-50001,CanaryPerson,RampurKalan,9876543210,8265 7330 7111,ABCDE1234F,canary.user@example.org\n",
+        "CLI-50001,CanaryPerson,TarapurKalan,9876543210,4123 4567 8901,ABCDE1234F,canary.user@example.org\n",
         encoding="utf-8",
     )
 

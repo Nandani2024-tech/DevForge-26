@@ -8,8 +8,14 @@ from typing import Any
 
 from wards.config import NUMERIC_REDACTION_SENTINEL, PLACEHOLDERS, REPORT_SCHEMA, Policy, validate_policy
 from wards.ingest import ParsedInput, json_pointer_escape, read_and_parse
+from wards.names import redact_names
 from wards.patterns import redact_identifiers
-from wards.columns import build_fhir_fullurl_map, classify_csv_columns, classify_json_key
+from wards.columns import (
+    build_fhir_fullurl_map,
+    classify_csv_columns,
+    classify_header_tokens,
+    classify_json_key,
+)
 from wards.pseudo import pseudonym, slot_patient_key
 from wards.resources import MemorySampler
 from wards.slots import (
@@ -54,9 +60,10 @@ class PipelineResult:
 
 
 def clean_text(text: str, stats: PipelineStats) -> str:
-    """Replace R6 identifiers and phones in free text while preserving line count. O(len(text))."""
-    cleaned, count = redact_identifiers(text)
-    stats.identifiers_detected += count
+    """Replace R6 identifiers/phones and R7 names in free text while preserving line count. O(len(text))."""
+    cleaned, id_count = redact_identifiers(text)
+    cleaned, name_count = redact_names(cleaned)
+    stats.identifiers_detected += id_count + name_count
     return cleaned
 
 
@@ -68,6 +75,7 @@ def _clean_json_values(
     parent_key: str | None = None,
     resource_type: str | None = None,
     ref_types: dict[str, str] | None = None,
+    parent_path: tuple[str, ...] = (),
 ) -> Any:
     """Clean JSON leaves by key semantics and R6 patterns while keeping structure and value types.
 
@@ -76,7 +84,11 @@ def _clean_json_values(
     if isinstance(value, str):
         if not value.strip():
             return value
-        semantic = classify_json_key(parent_key, parent_key or "", resource_type) if parent_key else "FREE_TEXT"
+        semantic = (
+            classify_json_key(parent_key, parent_key or "", resource_type, parent_path=parent_path)
+            if parent_key
+            else "FREE_TEXT"
+        )
         if semantic in _STRUCTURED_PII_KINDS:
             stats.identifiers_detected += 1
             return PLACEHOLDERS[semantic]
@@ -94,6 +106,7 @@ def _clean_json_values(
                 parent_key=parent_key,
                 resource_type=resource_type,
                 ref_types=ref_types,
+                parent_path=parent_path,
             )
             for item in value
         ]
@@ -108,17 +121,29 @@ def _clean_json_values(
         ref_target_type: str | None = None
         if preserve_fhir_refs and ref_types is not None and isinstance(value.get("reference"), str):
             ref_target_type = ref_types.get(value["reference"])
+        ext_semantic: str | None = None
+        if preserve_fhir_refs and isinstance(value.get("url"), str) and "valueString" in value:
+            ext_semantic = classify_header_tokens(value["url"].rsplit("/", 1)[-1])
 
         cleaned: dict[str, Any] = {}
         for k, v in value.items():
             if (container_id, k) in protected:
                 cleaned[k] = v
                 continue
-            if preserve_fhir_refs and k in ("resourceType", "id", "fullUrl", "reference", "system", "code", "status"):
+            if preserve_fhir_refs and k in ("resourceType", "id", "fullUrl", "reference", "system", "code", "status", "url"):
                 cleaned[k] = v
                 continue
 
-            semantic = classify_json_key(parent_key, k, cur_res_type, ref_target_type=ref_target_type)
+            if k == "valueString" and ext_semantic is not None:
+                semantic = ext_semantic
+            else:
+                semantic = classify_json_key(
+                    parent_key,
+                    k,
+                    cur_res_type,
+                    ref_target_type=ref_target_type,
+                    parent_path=parent_path,
+                )
             if isinstance(v, str):
                 if not v.strip():
                     cleaned[k] = v
@@ -145,6 +170,7 @@ def _clean_json_values(
                     parent_key=k,
                     resource_type=cur_res_type,
                     ref_types=ref_types,
+                    parent_path=(*parent_path[-2:], k),
                 )
             else:
                 cleaned[k] = v

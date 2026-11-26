@@ -10,10 +10,10 @@ from pathlib import Path
 
 def _write_inputs(inp: Path) -> None:
     # Folder and file names carry a fake patient name: a hidden channel (R9/R17).
-    folder = inp / "Ramesh_Kumar_ward"
+    folder = inp / "Karan_Bhatia_ward"
     folder.mkdir(parents=True)
-    (folder / "visit.csv").write_text("UHID,Name,Hb\nHOSP0001,Ramesh Kumar,13.1\n", encoding="utf-8")
-    (folder / "note.txt").write_text("UHID: HOSP0001\nPatient name: Ramesh Kumar\n", encoding="utf-8")
+    (folder / "visit.csv").write_text("UHID,Name,Hb\nHOSP0001,Karan Bhatia,13.1\n", encoding="utf-8")
+    (folder / "note.txt").write_text("UHID: HOSP0001\nPatient name: Karan Bhatia\n", encoding="utf-8")
     (inp / "broken.pdf").write_bytes(b"%PDF-1.4\n")
 
 
@@ -43,7 +43,7 @@ def test_r17_stdout_stderr_carry_no_input_paths_or_secret(tmp_path: Path, repo_r
     proc = _run(repo_root, inp, tmp_path / "out")
     assert proc.returncode == 0, proc.stderr
     streams = proc.stdout + proc.stderr
-    for forbidden in ("Ramesh", "Kumar", "visit", "note", "broken", "HOSP0001", "unit-secret"):
+    for forbidden in ("Karan", "Bhatia", "visit", "note", "broken", "HOSP0001", "unit-secret"):
         assert forbidden not in streams, f"stdout/stderr leaks an input-derived token: {forbidden!r}"
 
 

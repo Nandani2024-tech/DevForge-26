@@ -24,7 +24,7 @@ def test_meaning_vocabulary_synonyms() -> None:
 def test_numeric_empty_headers_and_mixed_blanks_via_shape_vote() -> None:
     header = ["", "123", "456", "789", "Notes"]
     rows = [
-        ["8265 7330 7111", "", "person.a@example.org", "226001", "Dolo 650mg 1-1-1 x 5 days"],
+        ["4123 4567 8901", "", "person.a@example.org", "226001", "Dolo 650mg 1-1-1 x 5 days"],
         ["", "9876543210", "", "226002", "BP 117/82"],
         ["3972 0583 9628", "", "person.b@example.org", "", "plt 1,45,000"],
     ]
@@ -105,6 +105,39 @@ def test_r5_fhir_reference_display_to_patient_is_redacted(tmp_path: Path) -> Non
     assert comp["subject"]["reference"] == pat_url
     assert comp["author"][0]["display"] == "Dr. Ilesh Varma"
     assert comp["title"] == "Discharge summary"
+
+
+def test_r5_fhir_patient_text_classified_by_parent_element(tmp_path: Path) -> None:
+    inp = tmp_path / "in"
+    out = tmp_path / "out"
+    inp.mkdir()
+    bundle = {
+        "resourceType": "Bundle",
+        "type": "document",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:00000000-0000-4000-8000-000000000010",
+                "resource": {
+                    "resourceType": "Patient",
+                    "name": [{"text": "Tarini Okafor", "given": ["Tarini"], "family": "Okafor"}],
+                    "maritalStatus": {"text": "Married"},
+                    "communication": [{"language": {"text": "Hindi"}}],
+                    "address": [{"text": "14 Canal Road", "district": "Kanpur"}],
+                },
+            }
+        ],
+    }
+    (inp / "patient.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+    run_pipeline(inp=inp, out=out, secret=b"fhir-text-secret", policy=load_policy())
+    san = json.loads((out / "sanitized" / "patient.json").read_text(encoding="utf-8"))
+    pat = san["entry"][0]["resource"]
+    assert pat["name"][0]["text"] == PLACEHOLDERS["PATIENT_NAME"]
+    assert pat["name"][0]["given"] == [PLACEHOLDERS["PATIENT_NAME"]]
+    assert pat["maritalStatus"]["text"] == "Married"
+    assert pat["communication"][0]["language"]["text"] == "Hindi"
+    assert pat["address"][0]["text"] == PLACEHOLDERS["ADDRESS"]
+    assert pat["address"][0]["district"] == "Kanpur"
 
 
 def test_renamed_csv_columns_end_to_end(tmp_path: Path) -> None:

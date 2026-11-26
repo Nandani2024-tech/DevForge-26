@@ -35,28 +35,28 @@ def test_preserve_medical_values_untouched() -> None:
 
 def test_all_r6_identifier_types_and_line_count() -> None:
     text = (
-        "Aadhaar: 8265 7330 7111 and ८२६५ ७३३० ७१११\n"
-        "Masked: XXXX XXXX 5866 and ****-****-1234\n"
-        "ABHA: 91-7938-3729-8403 Addr: patient.one@abdm\n"
+        "Aadhaar: 4123 4567 8901 and ४१२३ ४५६७ ८९०१\n"
+        "Masked: XXXX XXXX 4321 and ****-****-1234\n"
+        "ABHA: 91-1020-3040-5060 Addr: patient.one@abdm\n"
         "PAN: ABCDE1234F Email: person@example.org\n"
-        "Ins: PMJAY-XX-12345678 Policy No: POL-998811\n"
-        "IPD No: IPD-2026-00432 UHID: PSN-7Q2K9D\n"
+        "Policy No: POL-998811 Scheme ID: SCH-11223344\n"
+        "IPD No: IPD-2099-00999 UHID: PSN-7Q2K9D\n"
     )
     cleaned, count = redact_identifiers(text)
     assert count >= 11
     assert len(cleaned.splitlines()) == len(text.splitlines())
     for secret_val in (
-        "8265 7330 7111",
-        "८२६५",
-        "5866",
+        "4123 4567 8901",
+        "४१२३",
+        "4321",
         "1234",
-        "91-7938-3729-8403",
+        "91-1020-3040-5060",
         "patient.one@abdm",
         "ABCDE1234F",
         "person@example.org",
-        "PMJAY-XX-12345678",
+        "SCH-11223344",
         "POL-998811",
-        "IPD-2026-00432",
+        "IPD-2099-00999",
     ):
         assert secret_val not in cleaned
     assert "PSN-7Q2K9D" in cleaned
@@ -66,9 +66,9 @@ def test_r6_ids_before_sentence_punctuation_are_redacted() -> None:
     # Hand-derived: an ID ending a sentence is still an ID; the full stop is prose, not part
     # of a decimal (no digit follows it). Expected: value gone, punctuation kept.
     cases = (
-        ("Mobile 8723373611.", "8723373611", "Mobile [PHONE]."),
-        ("ABHA 91-7938-3729-8403.", "91-7938-3729-8403", "ABHA [ABHA]."),
-        ("Aadhaar 8265 7330 7111.", "8265 7330 7111", "Aadhaar [AADHAAR]."),
+        ("Mobile 8111222333.", "8111222333", "Mobile [PHONE]."),
+        ("ABHA 91-1020-3040-5060.", "91-1020-3040-5060", "ABHA [ABHA]."),
+        ("Aadhaar 4123 4567 8901.", "4123 4567 8901", "Aadhaar [AADHAAR]."),
         ("Call 9876543210!", "9876543210", "Call [PHONE]!"),
     )
     for text, surface, expected in cases:
@@ -88,23 +88,23 @@ def test_r6_decimal_lab_value_after_ten_digits_not_a_phone() -> None:
 def test_labelled_dob_village_address_and_pin_preserve_district() -> None:
     text = (
         "DOB: 14/06/1980\n"
-        "ग्राम: रामपुर\n"
-        "Address: House 12, Ward 20, Mohalla Chowk, Gram Rampur, Tehsil Sadar, Distt. Lucknow - 226001\n"
+        "ग्राम: तारापुर\n"
+        "Address: Plot 99, Lane 7, Block Nine, Gram Nandipur, Tehsil North, Distt. Kanpur - 209999\n"
         "Date of Admission: 02/01/2026\n"
     )
     cleaned, count = redact_identifiers(text)
     assert count == 4
     assert len(cleaned.splitlines()) == 4
     assert "14/06/1980" not in cleaned and "[DOB]" in cleaned
-    assert "रामपुर" not in cleaned and "[VILLAGE]" in cleaned
-    assert "House 12" not in cleaned and "Rampur" not in cleaned and "226001" not in cleaned
+    assert "तारापुर" not in cleaned and "[VILLAGE]" in cleaned
+    assert "Plot 99" not in cleaned and "Nandipur" not in cleaned and "209999" not in cleaned
     assert "[ADDRESS]" in cleaned and "[PIN]" in cleaned
-    assert "Distt. Lucknow" in cleaned
+    assert "Distt. Kanpur" in cleaned
     assert "Date of Admission: 02/01/2026" in cleaned
 
 
 def test_r6_dense_text_scales_linearly() -> None:
-    sample_line = "UHID: X-123. Mobile 9876543210. PAN ABCDE1234F. Aadhaar 8265 7330 7111. Dolo 650mg 1-1-1.\n"
+    sample_line = "UHID: X-123. Mobile 9876543210. PAN ABCDE1234F. Aadhaar 4123 4567 8901. Dolo 650mg 1-1-1.\n"
     timings: list[float] = []
     for n_lines in (2000, 20000):
         payload = sample_line * n_lines
@@ -115,6 +115,5 @@ def test_r6_dense_text_scales_linearly() -> None:
         assert "9876543210" not in cleaned
         timings.append(elapsed)
 
-    # 10x input must remain well below quadratic growth (10x -> < 20x wall time, and < 2.0s total)
     assert timings[1] < 2.0
     assert timings[1] <= max(0.25, timings[0] * 20.0)

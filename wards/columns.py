@@ -113,7 +113,24 @@ _LANDMARK_TOKENS = frozenset({"landmark", "near", "opp"})
 _VILLAGE_TOKENS = frozenset({"village", "gaon", "gram", "city", "town", "गाँव", "गांव", "ग्राम"})
 _ADDRESS_TOKENS = frozenset({"address", "addr", "pata", "पता"})
 _RELATIVE_TOKENS = frozenset(
-    {"relative", "guardian", "father", "mother", "husband", "wife", "spouse", "kin", "pita", "pati", "पिता", "पति", "अभिभावक"}
+    {
+        "relative",
+        "guardian",
+        "father",
+        "fathers",
+        "mother",
+        "mothers",
+        "husband",
+        "wife",
+        "spouse",
+        "kin",
+        "pita",
+        "pati",
+        "पिता",
+        "पति",
+        "माता",
+        "अभिभावक",
+    }
 )
 _NAME_TOKENS = frozenset({"name", "naam", "fname", "lname", "नाम"})
 _PERSON_NAME_MODIFIERS = frozenset({"patient", "pt", "first", "last", "full", "given", "family", "local", "मरीज़", "मरीज", "रोगी"})
@@ -272,8 +289,9 @@ def classify_json_key(
     key: str,
     resource_type: str | None = None,
     ref_target_type: str | None = None,
+    parent_path: tuple[str, ...] = (),
 ) -> str:
-    """Classify a JSON leaf key using parent context, FHIR Reference target, and key tokens.
+    """Classify a JSON leaf key using parent element path, FHIR Reference target, and key tokens.
 
     Complexity: O(len(key) + len(parent_key)).
     """
@@ -296,12 +314,15 @@ def classify_json_key(
         if parent_key and parent_key.casefold() in _FHIR_CODE_CONTAINERS:
             return "PRESERVE_EXACT"
         if resource_type in ("Patient", "RelatedPerson"):
-            if parent_key == "contact" or "contact" in parent_tokens:
-                if key_tokens & _NAME_TOKENS or key == "text":
-                    return "RELATIVE"
-            if parent_key == "name" or key == "name":
-                if key in ("text", "given", "family", "name"):
-                    return "PATIENT_NAME" if resource_type == "Patient" else "RELATIVE"
+            in_contact = "contact" in parent_path
+            in_name = "name" in parent_path
+            in_address = "address" in parent_path
+            if in_contact and (key == "name" or (in_name and key in ("text", "given", "family"))):
+                return "RELATIVE"
+            if key == "name" or (in_name and key in ("text", "given", "family")):
+                return "PATIENT_NAME" if resource_type == "Patient" else "RELATIVE"
+            if in_address and key == "text":
+                return "ADDRESS"
             if key == "birthDate":
                 return "DOB"
             if key == "postalCode":
@@ -314,6 +335,8 @@ def classify_json_key(
                 return "PRESERVE_EXACT"
             if key == "div":
                 return "FREE_TEXT"
+            if parent_key and parent_key.casefold() in ("maritalstatus", "language", "communication"):
+                return "PRESERVE_EXACT"
         elif key in ("title", "unit", "system", "code"):
             return "PRESERVE_EXACT"
         elif key == "div":

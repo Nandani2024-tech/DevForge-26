@@ -83,7 +83,7 @@ def test_kit_contract_shape_and_spike(tmp_path: Path, repo_root: Path, kit_dir: 
     assert "CONTRACT OK" in val_proc.stdout
     assert "WARN" not in val_proc.stdout
 
-    # 2. check_dev.py -> RAW COPIES: 0 and MEDICAL DATA KEPT >= 97%
+    # 2. check_dev.py -> RAW COPIES: 0, MEDICAL DATA KEPT >= 97%, and slice-2b name reductions
     dev_proc = subprocess.run(
         [sys.executable, str(kit_dir / "check_dev.py"), "--output", str(out_dir)],
         cwd=repo_root,
@@ -97,6 +97,17 @@ def test_kit_contract_shape_and_spike(tmp_path: Path, repo_root: Path, kit_dir: 
     med_match = re.search(r"MEDICAL DATA KEPT:.*?(\d+\.\d+)%", dev_proc.stdout)
     assert med_match is not None, dev_proc.stdout
     assert float(med_match.group(1)) >= 97.0
+
+    overall_match = re.search(r"PERSONAL DATA:.*?\(\s*(\d+\.\d+)% leaked", dev_proc.stdout)
+    pname_match = re.search(r"PATIENT_NAME\s+leaked\s+\d+\s*/\s*\d+\s+(\d+\.\d+)%", dev_proc.stdout)
+    canary_match = re.search(r"CANARIES:\s+(\d+)\s+of\s+(\d+)", dev_proc.stdout)
+    lang_match = re.search(r"by language:.*?deva\s+(\d+\.\d+)%,\s*hinglish\s+(\d+\.\d+)%", dev_proc.stdout)
+    assert overall_match and pname_match and canary_match and lang_match, dev_proc.stdout
+    assert float(overall_match.group(1)) < 16.0
+    assert float(pname_match.group(1)) < 33.9
+    assert int(canary_match.group(1)) < 3
+    assert float(lang_match.group(1)) < 100.0
+    assert float(lang_match.group(2)) < 100.0
 
     # 3. check_submission.py --repo . --run -> READY TO SUBMIT
     sub_proc = subprocess.run(
