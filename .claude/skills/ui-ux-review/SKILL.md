@@ -9,7 +9,7 @@ Input: `$ARGUMENTS` = the screen or flow name (e.g. `search results`, `demo flow
 Read ONLY: the Core user flow and judging section in `.hackathon/01-ps.md`, the `## Screens and UX` section of `04-idea-scope.md` (primary action per screen, UI kit), the UI/UX rules in `00-rules.md`, and the run command. Do NOT scan the repo, except the files of the screen under review.
 
 Getting the real UI: try in this order, and record which one you used.
-1. Use screenshots the user pastes or points to (ask for them if none are provided and nothing else works; when run from `/ship`, never ask: go straight to step 3).
+1. Use screenshots the user pastes or points to (ask for them if none are provided and nothing else works; when run from `/verify-commit`, never ask: go straight to step 3).
 2. If Playwright or a browser tool is available, start the app with the run command and capture screenshots of the flow at desktop and a projector-like size (1280x720), plus a narrow mobile width if the PS needs mobile.
 3. If neither is possible, review the code of the screen only, and label EVERY visual finding `unverified (code only)`. State that a visual review is still needed.
 

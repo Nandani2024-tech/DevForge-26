@@ -1,6 +1,6 @@
 ---
 name: decision
-description: Record an approach change (old approach replaced by a better one) in .hackathon/DECISIONS.md, or fill in the reason for one /ship logged as unknown. Use when you change direction outside /pivot-check or /unstick.
+description: Record an approach change (old approach replaced by a better one) in .hackathon/DECISIONS.md, or fill in the reason for one /verify-commit logged as unknown. Use when you change direction outside /pivot-check or /unstick.
 disable-model-invocation: true
 argument-hint: what changed and why, e.g. "R3 swapped regex parser for lark: regex broke on nested input"
 ---

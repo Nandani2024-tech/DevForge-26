@@ -4,7 +4,7 @@ description: Audit the recent git diff for hardcoding, static fake data, patches
 disable-model-invocation: true
 ---
 
-Input: `$ARGUMENTS` (optional: a commit range, a feature name, or `WORKTREE`). If `$ARGUMENTS` is `WORKTREE` (set by /ship), the change set is the uncommitted work: `git diff HEAD` plus untracked non-ignored files (`git ls-files --others --exclude-standard`), excluding `.hackathon/`; treat every line of an untracked file as added. Otherwise the default range is: `base` from `.hackathon/PROGRESS.md` to HEAD; if there is no `base` or that range is empty, `HEAD~1..HEAD`. Read `.hackathon/00-rules.md` (including Allowed exceptions) and the R-ids in `.hackathon/01-ps.md` for the feature. Do NOT scan the whole repo. Do NOT edit any code.
+Input: `$ARGUMENTS` (optional: a commit range, a feature name, or `WORKTREE`). If `$ARGUMENTS` is `WORKTREE` (set by /verify-commit), the change set is the uncommitted work: `git diff HEAD` plus untracked non-ignored files (`git ls-files --others --exclude-standard`), excluding `.hackathon/`; treat every line of an untracked file as added. Otherwise the default range is: `base` from `.hackathon/PROGRESS.md` to HEAD; if there is no `base` or that range is empty, `HEAD~1..HEAD`. Read `.hackathon/00-rules.md` (including Allowed exceptions) and the R-ids in `.hackathon/01-ps.md` for the feature. Do NOT scan the whole repo. Do NOT edit any code.
 
 Method:
 1. `git diff <range>` (added lines only) for first-pass pattern search, then read only the flagged hunks and their surrounding function for judgment.

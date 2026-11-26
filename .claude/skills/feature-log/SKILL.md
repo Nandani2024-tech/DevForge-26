@@ -12,7 +12,7 @@ Read ONLY: `.hackathon/PROGRESS.md` (if it exists), the MUST list and Build orde
 Print the dashboard from `PROGRESS.md` (recompute it first, see below). Do not add an entry. Stop.
 
 ## Mode feature
-1. `git status --short -- . ':(exclude).hackathon'` (`.hackathon/` is never committed, so ignore it). If there are uncommitted changes, stop and tell the user to run `/ship` (or commit first). When called from `/ship` the commit already exists and the tree is clean.
+1. `git status --short -- . ':(exclude).hackathon'` (`.hackathon/` is never committed, so ignore it). If there are uncommitted changes, stop and tell the user to run `/verify-commit` (or commit first). When called from `/verify-commit` the commit already exists and the tree is clean.
 2. Set `base` = the `base:` hash in `PROGRESS.md`. If none, use the first commit (`git rev-list --max-parents=0 HEAD`).
 3. Gather facts (git only, no repo scan):
    - `git log --oneline --format="%h %ad %s" --date=iso <base>..HEAD`
@@ -20,7 +20,7 @@ Print the dashboard from `PROGRESS.md` (recompute it first, see below). Do not a
    - commits whose message contains "revert" (case-insensitive)
    - files deleted or renamed in the range (`--diff-filter=DR`)
    - files from earlier logged features that were modified again in this range
-4. If called from `/ship`, the test results are supplied: use them and do not re-run the tests. Otherwise run the project's test command. Record pass/fail counts and failing test names. If you cannot run it, write `tests: NOT RUN` and why. Never claim they passed without running them.
+4. If called from `/verify-commit`, the test results are supplied: use them and do not re-run the tests. Otherwise run the project's test command. Record pass/fail counts and failing test names. If you cannot run it, write `tests: NOT RUN` and why. Never claim they passed without running them.
 5. Check the acceptance test of each R-id by running it or reading its test output. Status per R-id: `done-verified` (acceptance evidence seen), `done-unverified` (code exists, no evidence), `partial`, `reverted`, `not started`. Never mark `done-verified` without evidence.
 6. Compare with the scope: files touched vs the R-ids and Build order hint in `04-idea-scope.md`; unplanned files touched; elapsed time from first to last commit of this feature.
 7. Revert accounting, exact and factual:

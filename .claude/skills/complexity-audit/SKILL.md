@@ -4,7 +4,7 @@ description: "Audit changed code against the Big-O and performance targets in th
 disable-model-invocation: true
 ---
 
-Input: `$ARGUMENTS` (optional: a feature, R-ids, a commit range, or `WORKTREE`). If `$ARGUMENTS` is `WORKTREE` (set by /ship), the change set is the uncommitted work: `git diff HEAD` plus untracked non-ignored files (`git ls-files --others --exclude-standard`), excluding `.hackathon/`; treat every line of an untracked file as added. Otherwise the default range is `HEAD~1..HEAD`.
+Input: `$ARGUMENTS` (optional: a feature, R-ids, a commit range, or `WORKTREE`). If `$ARGUMENTS` is `WORKTREE` (set by /verify-commit), the change set is the uncommitted work: `git diff HEAD` plus untracked non-ignored files (`git ls-files --others --exclude-standard`), excluding `.hackathon/`; treat every line of an untracked file as added. Otherwise the default range is `HEAD~1..HEAD`.
 
 Read ONLY: the complexity and performance targets in `.hackathon/04-idea-scope.md`, the quality targets in `01-ps.md` (section 6), `02-domain.md` section 4 (expected complexity per method), the run and test commands in `00-rules.md`, and the changed files in the range. Do NOT scan the repo. Do NOT edit project code.
 

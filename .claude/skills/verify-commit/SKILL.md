@@ -1,5 +1,5 @@
 ---
-name: ship
+name: verify-commit
 description: After Antigravity finishes a build task, verify the uncommitted change set through the scope, test, hardcode, complexity and UI gates. Commit with a detailed message only if nothing fails, then log progress. Run after every build task.
 disable-model-invocation: true
 argument-hint: R-ids and label, then optionally Antigravity's final report, e.g. R2 search endpoint
@@ -40,7 +40,7 @@ Embedded-mode overrides (these win over the gate's own text):
    - Scaffold task (the label, R-ids or `build.current-task` say scaffold) with a `TBD` test command: take the run, test and lint commands from the pasted Antigravity report, check each matches a script or config in the change set's manifest, write them into `00-rules.md` in place of `TBD after scaffold`, and continue. If the report has no test command or it does not match the manifest, stop with a one-line reason.
 2. Change set (CS) = tracked changes against HEAD (`git diff HEAD --name-status`) plus untracked non-ignored files (`git ls-files --others --exclude-standard`), excluding `.hackathon/`. Record the current HEAD short hash as `pre`.
 3. If CS is empty:
-   - If `ship.last` in `STATE.md` (else the `base:` hash in `PROGRESS.md`) differs from HEAD, commits were made outside `/ship`. Use the range `<that hash>..HEAD` as the change set in place of `WORKTREE` for every gate, skip step 7 (no commit), and say so in the report.
+   - If `ship.last` in `STATE.md` (else the `base:` hash in `PROGRESS.md`) differs from HEAD, commits were made outside `/verify-commit`. Use the range `<that hash>..HEAD` as the change set in place of `WORKTREE` for every gate, skip step 7 (no commit), and say so in the report.
    - Otherwise print `Nothing to ship.` and stop.
 4. If CS has 50 or more untracked files, or any path under `node_modules/`, `dist/`, `build/`, `.venv/`, `__pycache__/`, or any `.env*` file other than `.env.example` / `.env.sample` / `.env.template`: stop and tell the user to fix `.gitignore` first.
 
@@ -75,11 +75,11 @@ Overall = FAIL if any gate is FAIL; else WARN if any gate is WARN (treat as FAIL
 If FAIL:
 1. Write `.hackathon/SHIP.md` (overwrite, max 40 lines): `<date> | <R-ids> | BLOCKED`, a table `gate | verdict | blockers | warnings`, then the merged fix prompt.
 2. Print the merged fix prompt in ONE fenced block for Antigravity. First line: `Read first: @.hackathon/00-rules.md @.hackathon/01-brief.md @.hackathon/MISTAKES.md`. Then numbered fixes grouped by file, ordered: failing tests (code bugs), hardcode BLOCKERs, complexity misses, UI blockers, scope reverts. Each fix has file:line, the problem, and the root-cause fix. Remove overlaps. End with: `Do not commit or push. No workarounds. Fix root causes, run the tests and show the output.`
-3. In `STATE.md`, increment `ship.fail.<R-id>.<gate>` for every failed gate. If any counter reaches 2, or any `MISTAKES.md` line touched in this run has `seen` 2 or more, end with `Next: /unstick <that blocker>`. Otherwise end with `Next: paste the fix prompt into Antigravity, then /ship <R-ids>`.
+3. In `STATE.md`, increment `ship.fail.<R-id>.<gate>` for every failed gate. If any counter reaches 2, or any `MISTAKES.md` line touched in this run has `seen` 2 or more, end with `Next: /unstick <that blocker>`. Otherwise end with `Next: paste the fix prompt into Antigravity, then /verify-commit <R-ids>`.
 4. Stop. Do not commit and do not edit source.
 
 ### 7. Commit (PASS or WARN)
-1. Run `git status` again. If files outside CS (other than `.hackathon/`) changed during the run, stop and tell the user to re-run `/ship`.
+1. Run `git status` again. If files outside CS (other than `.hackathon/`) changed during the run, stop and tell the user to re-run `/verify-commit`.
 2. Stage list = CS minus these exclusions: `.hackathon/`, `.env*`, `*.pem`, `*.key`, `*.log`, build output, files over 5 MB. Any excluded file that is not gitignored (except `.hackathon/`, which stays untracked on purpose) is listed in the report with the advice to gitignore it.
 3. Stage with explicit paths: `git add -- <path> <path> ...`, in batches of at most 30 paths. Include deleted files by path.
 4. Run `git diff --cached --stat`. It must match the stage list. Print it.

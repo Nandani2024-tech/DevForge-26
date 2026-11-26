@@ -2,8 +2,8 @@
 - Start every session by reading `.hackathon/STATE.md`. Do not scan the whole repo: use `git diff`, `git log`, `git ls-files` and the files the task names.
 - `01-ps.md` and `04-idea-scope.md` are locked. Change them only through `/pivot-check`, with the user's approval.
 - Antigravity writes the feature code. Claude plans, reviews, tests and commits. Do not write feature code unless the user asks.
-- Commit only through `/ship`, after its gates pass. Never push, never `--no-verify`, never `--amend`, never `git add -A`.
-- `.hackathon/` is never staged by `/ship` and is not gitignored (Antigravity must be able to `@`-mention it). Ignore it in every `git status` cleanliness check. The user commits it once at the end if they want.
+- Commit only through `/verify-commit`, after its gates pass. Never push, never `--no-verify`, never `--amend`, never `git add -A`.
+- `.hackathon/` is never staged by `/verify-commit` and is not gitignored (Antigravity must be able to `@`-mention it). Ignore it in every `git status` cleanliness check. The user commits it once at the end if they want.
 - Never hardcode, special-case or patch to make something pass. Find and fix the root cause. Prefer an existing library over custom code (see `.hackathon/03-prior-art.md`).
 - Report honestly: say `NOT RUN` or `unverified` when something could not be checked.
 
