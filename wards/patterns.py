@@ -42,6 +42,9 @@ _UNIT_FOLLOW_RE = re.compile(
     r"[ \t]*(?:mg|mcg|ug|g|kg|ml|dl|l|iu|mmhg|bpm|meq|mmol|/ul|/dl|/l|%)(?![A-Za-z])",
     re.IGNORECASE,
 )
+_DOSE_UNIT_RE = re.compile(rf"(?<!\d)\d+(?:\.\d+)?{_UNIT_FOLLOW_RE.pattern}", re.IGNORECASE)
+_FREQ_PATTERN_RE = re.compile(r"(?<![A-Za-z0-9-])\d(?:-\d){2,3}(?![A-Za-z0-9-])")
+_FREQ_CADENCE_RE = re.compile(r"^[A-Za-z]{1,6}[ \t]*[x×][ \t]*\d{1,3}(?:[ \t]+[A-Za-z\u0900-\u097f]+)?$")
 _NON_DIGIT_RE = re.compile(r"\D")
 _PSN_BODY = r"PSN-[0-9A-Z]{6}"
 _PSN_RE = re.compile(rf"^{_PSN_BODY}$")
@@ -366,8 +369,23 @@ def redact_identifiers(
     return "".join(parts), len(spans)
 
 
-def classify_value_shape(value: str) -> str | None:
-    """Classify a single non-empty cell value by R6 shape for column voting. O(len(value))."""
+def has_unit_or_frequency(value: str) -> bool:
+    """Return True if a cell carries a clinical unit, dosing cadence, or single-digit frequency (R8). O(len(value))."""
+    s = normalise_digits(value.strip())
+    if not s:
+        return False
+    return (
+        _DOSE_UNIT_RE.search(s) is not None
+        or _FREQ_PATTERN_RE.search(s) is not None
+        or _FREQ_CADENCE_RE.match(s) is not None
+    )
+
+
+def classify_value_shape(value: str, *, include_pin: bool = True) -> str | None:
+    """Classify a single non-empty cell value by R6 shape for column voting. O(len(value)).
+
+    include_pin=False skips the postal-code shape (a PIN is a quasi-identifier, not an ID).
+    """
     s = normalise_digits(value.strip())
     if not s:
         return None
@@ -389,9 +407,16 @@ def classify_value_shape(value: str) -> str | None:
         return "PHONE"
     if _MRN_SHAPE_RE.fullmatch(s) and _is_valid_mrn_token(s):
         return "MRN"
-    if _PIN_SHAPE_RE.fullmatch(s):
+    if include_pin and _PIN_SHAPE_RE.fullmatch(s):
         return "PIN"
     return None
+
+
+def classify_strict_id_shape(value: str) -> str | None:
+    """Classify strict R6 ID/contact shapes (excluding PINs and any medical unit/frequency cell). O(len(value))."""
+    if has_unit_or_frequency(value):
+        return None
+    return classify_value_shape(value, include_pin=False)
 
 
 # Precompiled R9 base64 / RFC 2397 data: URI shape patterns (single regex per shape; O(len))

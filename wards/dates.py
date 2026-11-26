@@ -53,7 +53,7 @@ _ISO_DATE_RE = re.compile(
 )
 _NUM_4Y_RE = re.compile(
     r"(?<![A-Za-z0-9/.-])"
-    rf"(?P<a>\d{{1,2}})(?P<sep>[-/])(?P<b>\d{{1,2}})(?P=sep)(?P<y>{_YEAR4})"
+    rf"(?P<a>\d{{1,2}})(?P<sep>[-/.])(?P<b>\d{{1,2}})(?P=sep)(?P<y>{_YEAR4})"
     + _DATE_END
 )
 _NUM_2Y_RE = re.compile(

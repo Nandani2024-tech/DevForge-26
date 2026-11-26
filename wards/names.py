@@ -25,7 +25,7 @@ from wards.config import (
     RELATIVE_LABELS,
     SUFFIX_HONORIFICS,
 )
-from wards.patterns import PROTECTED_TOKEN_RE
+from wards.patterns import PROTECTED_TOKEN_RE, has_unit_or_frequency
 
 # Token building blocks (horizontal whitespace only so line counts stay unchanged)
 _LATIN_TOK = r"(?:[A-Za-z][A-Za-z'.-]{0,30})"
@@ -56,6 +56,21 @@ _FAST_PROTECT_RE = re.compile(
     r"(?i:\b\d+(?:\.\d+)?[ \t]*(?:mg|mcg|ug|gm?|kg|ml|dl|l|iu|units?|mmhg|bpm|meq|mmol|/ul|/dl|/l|%)\b|"
     r"\b\d+-\d+-\d+\b|\b(?:BP|Pulse|Temp|SpO2|RBS|Hb|HbA1c|TLC|WBC|Plt)[ \t:]*\d+(?:[./]\d+)?\b)"
 )
+
+
+def is_r8_medical_value(value: str) -> bool:
+    """True if a value carries an R8 dose, unit, frequency, vital or ward pattern. O(len(value)).
+
+    Built on the protect mask; a PSN/placeholder match alone is not medical evidence.
+    """
+    s = value.strip()
+    if not s:
+        return False
+    if has_unit_or_frequency(s):
+        return True
+    return any(PROTECTED_TOKEN_RE.fullmatch(m.group()) is None for m in _FAST_PROTECT_RE.finditer(s))
+
+
 _KCO_HO_START_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9/])(?:No[ \t]+)?(?:N/K/C/O|K/C/O|H/O)[ \t]*:?[ \t]*"
 )

@@ -6,8 +6,16 @@ import unicodedata
 from collections import deque
 from typing import Any, Callable
 
-from wards.columns import NAME_KEY_TOKENS
-from wards.config import PLACEHOLDERS
+from wards.columns import NAME_KEY_TOKENS, collect_list_preserve_overrides, resolve_id_slot_override
+from wards.config import (
+    COLUMN_VOTE_SAMPLE_CAP,
+    PLACEHOLDERS,
+    PRIMARY_ID_TYPE,
+    SLOT_PRIORITY_EXCLUDED,
+    SLOT_PRIORITY_NEUTRAL,
+    SLOT_PRIORITY_PRIMARY,
+    SLOT_PRIORITY_SECONDARY,
+)
 
 # Generic vocabulary of ID-meaning tokens (no dev-specific header sets)
 _DIRECT_PATIENT_ID_TOKENS = frozenset({"uhid", "mrn", "uid"})
@@ -109,56 +117,110 @@ def _names_non_patient_thing(tok_set: set[str]) -> bool:
     if not tok_set & _NON_PATIENT_TOKENS:
         return False
     # Allow explicit patient-ID phrases even when combined with other words
-    has_patient_id = bool(
+    return not (
         (tok_set & _DIRECT_PATIENT_ID_TOKENS)
         or ((tok_set & _PATIENT_NOUN_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS))
     )
-    return not has_patient_id
 
 
-def is_non_patient_id_key(key: str) -> bool:
-    """True if a header/key names a non-patient identifier, so its values are not patient
-    evidence (R10). O(len(key))."""
-    return _names_non_patient_thing(set(_key_tokens(key)))
+def _slot_key_priority(
+    key: str,
+    sample_values: list[str] | None = None,
+    *,
+    preserve_overrides: dict[str, str | None] | None = None,
+) -> int:
+    """Return key slot priority, allowing high-cardinality non-medical R6 ID overrides on PRESERVE_EXACT keys.
+
+    Complexity: O(len(key) + sum(len(v) for v in sample_values or ())).
+    """
+    prio = _key_priority(key)
+    if prio == SLOT_PRIORITY_EXCLUDED:
+        if preserve_overrides is not None and key in preserve_overrides:
+            override = preserve_overrides[key]
+        elif sample_values:
+            override = resolve_id_slot_override(key, sample_values)
+        else:
+            override = None
+        if override is not None:
+            return SLOT_PRIORITY_NEUTRAL if override == PRIMARY_ID_TYPE else SLOT_PRIORITY_SECONDARY
+    return prio
+
+
+def is_non_patient_id_key(
+    key: str,
+    sample_values: list[str] | None = None,
+    *,
+    preserve_overrides: dict[str, str | None] | None = None,
+) -> bool:
+    """True if header/key names a non-patient identifier not overridden by strict R6 ID shape (R10).
+
+    Complexity: O(len(key)).
+    """
+    if not _names_non_patient_thing(set(_key_tokens(key))):
+        return False
+    if preserve_overrides is not None and key in preserve_overrides:
+        return preserve_overrides[key] is None
+    if sample_values and resolve_id_slot_override(key, sample_values) is not None:
+        return False
+    return True
 
 
 def _key_priority(key: str) -> int:
-    """Return 1 for primary patient-ID meaning, 2 for secondary ID, -1 for excluded, 0 neutral."""
+    """Return the SLOT_PRIORITY_* meaning of a key: primary, secondary, excluded or neutral."""
     tokens = _key_tokens(key)
     if not tokens:
-        return -1
+        return SLOT_PRIORITY_EXCLUDED
     tok_set = set(tokens)
     if _names_non_patient_thing(tok_set):
-        return -1
+        return SLOT_PRIORITY_EXCLUDED
     if tok_set & _DIRECT_PATIENT_ID_TOKENS:
-        return 1
+        return SLOT_PRIORITY_PRIMARY
     if (tok_set & _PATIENT_NOUN_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS):
-        return 1
+        return SLOT_PRIORITY_PRIMARY
     if (tok_set & _RECORD_PREFIX_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS):
-        return 1
+        return SLOT_PRIORITY_PRIMARY
     if (tok_set & _DEVA_ID_PREFIXES) and (tok_set & _ID_SUFFIX_TOKENS):
-        return 1
+        return SLOT_PRIORITY_PRIMARY
     # Bare "id" without a patient/record qualifier is ambiguous
     if tok_set == {"id"}:
-        return -1
+        return SLOT_PRIORITY_EXCLUDED
     if tok_set & _SECONDARY_ID_TOKENS:
-        return 2
-    return 0
+        return SLOT_PRIORITY_SECONDARY
+    return SLOT_PRIORITY_NEUTRAL
 
 
 def _looks_like_patient_id(value: str) -> bool:
     return bool(_ID_SHAPE_RE.match(value.strip()))
 
 
-def select_csv_slot_column(header: list[str], body_rows: list[list[str]]) -> int | None:
-    """Select the best patient-ID column using meaning tokens + column-level value-shape vote.
+def csv_slot_priorities(header: list[str], body_rows: list[list[str]]) -> list[int]:
+    """Slot priority per column, decided once over the column's sampled values (never per row).
+
+    Complexity: O(min(len(body_rows), COLUMN_VOTE_SAMPLE_CAP) * len(header)).
+    """
+    sampled = body_rows[:COLUMN_VOTE_SAMPLE_CAP]
+    return [
+        _slot_key_priority(
+            col_name,
+            [row[idx].strip() for row in sampled if idx < len(row) and row[idx].strip()],
+        )
+        for idx, col_name in enumerate(header)
+    ]
+
+
+def select_csv_slot_column(
+    header: list[str],
+    body_rows: list[list[str]],
+    col_priorities: list[int],
+) -> int | None:
+    """Select the best patient-ID column using precomputed column priorities + value-shape vote.
 
     Complexity: O(len(body_rows) * len(header)).
     """
     best_secondary: int | None = None
     best_shape: tuple[float, int] | None = None
 
-    for idx, col_name in enumerate(header):
+    for idx in range(len(header)):
         non_empty = 0
         id_shaped = 0
         for row in body_rows:
@@ -169,12 +231,12 @@ def select_csv_slot_column(header: list[str], body_rows: list[list[str]]) -> int
         if non_empty == 0:
             continue
 
-        prio = _key_priority(col_name)
-        if prio == 1:
+        prio = col_priorities[idx]
+        if prio == SLOT_PRIORITY_PRIMARY:
             return idx
-        if prio == 2 and best_secondary is None:
+        if prio == SLOT_PRIORITY_SECONDARY and best_secondary is None:
             best_secondary = idx
-        elif prio == 0 and id_shaped * 2 >= non_empty:
+        elif prio == SLOT_PRIORITY_NEUTRAL and id_shaped * 2 >= non_empty:
             ratio = id_shaped / non_empty
             if best_shape is None or ratio > best_shape[0]:
                 best_shape = (ratio, idx)
@@ -184,9 +246,19 @@ def select_csv_slot_column(header: list[str], body_rows: list[list[str]]) -> int
     return best_shape[1] if best_shape is not None else None
 
 
-def find_csv_slot(header: list[str], row: list[str], preferred_col: int | None = None) -> tuple[int, str] | None:
-    """Locate the patient-ID column index and raw value in a CSV/TSV row."""
-    if preferred_col is not None and preferred_col < len(row):
+def find_csv_slot(
+    header: list[str],
+    row: list[str],
+    preferred_col: int | None = None,
+    *,
+    col_priorities: list[int],
+    excluded_cols: set[int] | frozenset[int] = frozenset(),
+) -> tuple[int, str] | None:
+    """Locate the patient-ID column index and raw value in a CSV/TSV row.
+
+    col_priorities come from csv_slot_priorities (decided once per column). O(len(row)).
+    """
+    if preferred_col is not None and preferred_col not in excluded_cols and preferred_col < len(row):
         val = row[preferred_col].strip()
         if val:
             return preferred_col, val
@@ -197,15 +269,17 @@ def find_csv_slot(header: list[str], row: list[str], preferred_col: int | None =
     for idx, raw_val in enumerate(row):
         if idx >= len(header):
             break
+        if idx in excluded_cols:
+            continue
         val = raw_val.strip()
         if not val:
             continue
-        prio = _key_priority(header[idx])
-        if prio == 1:
+        prio = col_priorities[idx]
+        if prio == SLOT_PRIORITY_PRIMARY:
             return idx, val
-        if prio == 2 and best_secondary is None:
+        if prio == SLOT_PRIORITY_SECONDARY and best_secondary is None:
             best_secondary = (idx, val)
-        elif prio == 0 and best_shape is None and _looks_like_patient_id(val):
+        elif prio == SLOT_PRIORITY_NEUTRAL and best_shape is None and _looks_like_patient_id(val):
             best_shape = (idx, val)
 
     return best_secondary if best_secondary is not None else best_shape
@@ -217,10 +291,14 @@ def find_csv_slot_or_fallback(
     col_types: list[str],
     preferred_col: int | None = None,
     *,
+    col_priorities: list[int],
+    excluded_cols: set[int] | frozenset[int] = frozenset(),
     allow_name_fallback: bool = False,
 ) -> int | None:
     """Locate CSV patient slot index, falling back to PATIENT_NAME column when linked without ID."""
-    found = find_csv_slot(header, row, preferred_col=preferred_col)
+    found = find_csv_slot(
+        header, row, preferred_col=preferred_col, col_priorities=col_priorities, excluded_cols=excluded_cols
+    )
     if found is not None:
         return found[0]
     if allow_name_fallback:
@@ -230,7 +308,11 @@ def find_csv_slot_or_fallback(
     return None
 
 
-def _find_json_slot_target(obj: dict[str, Any]) -> tuple[dict[str, Any], str, str] | None:
+def _find_json_slot_target(
+    obj: dict[str, Any],
+    *,
+    preserve_overrides: dict[str, str | None] | None = None,
+) -> tuple[dict[str, Any], str, str] | None:
     """Find the best string-valued patient-ID slot inside a JSON record dict via BFS."""
     best_secondary: tuple[dict[str, Any], str, str] | None = None
     best_shape: tuple[dict[str, Any], str, str] | None = None
@@ -243,12 +325,12 @@ def _find_json_slot_target(obj: dict[str, Any]) -> tuple[dict[str, Any], str, st
                 val = v.strip()
                 if not val:
                     continue
-                prio = _key_priority(k)
-                if prio == 1:
+                prio = _slot_key_priority(k, preserve_overrides=preserve_overrides)
+                if prio == SLOT_PRIORITY_PRIMARY:
                     return cur, k, val
-                if prio == 2 and best_secondary is None:
+                if prio == SLOT_PRIORITY_SECONDARY and best_secondary is None:
                     best_secondary = (cur, k, val)
-                elif prio == 0 and best_shape is None and _looks_like_patient_id(val):
+                elif prio == SLOT_PRIORITY_NEUTRAL and best_shape is None and _looks_like_patient_id(val):
                     best_shape = (cur, k, val)
             elif isinstance(v, dict):
                 queue.append(v)
@@ -268,8 +350,9 @@ def is_document_json(data: Any) -> bool:
         return True
 
     for items in list_fields:
+        overrides = collect_list_preserve_overrides(items)
         for item in items[:5]:
-            if _find_json_slot_target(item) is not None:
+            if _find_json_slot_target(item, preserve_overrides=overrides) is not None:
                 return False
 
     root_only = {
@@ -302,6 +385,7 @@ def write_json_slot_psn(
     value: str,
     *,
     allow_name_fallback: bool = False,
+    preserve_overrides: dict[str, str | None] | None = None,
 ) -> tuple[int, str] | None:
     """Write the PSN (or, for a null patient, the ID placeholder) into the JSON patient-ID slot.
 
@@ -309,7 +393,7 @@ def write_json_slot_psn(
     """
     if not isinstance(obj, dict):
         return None
-    target = _find_json_slot_target(obj)
+    target = _find_json_slot_target(obj, preserve_overrides=preserve_overrides)
     if target is not None:
         container, key, _ = target
         container[key] = value

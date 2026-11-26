@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 
+from wards.channels import ChannelEvidence
 from wards.columns import classify_csv_columns, classify_header_tokens, classify_json_key
 from wards.config import PLACEHOLDERS, load_policy
 from wards.pipeline import run_pipeline
@@ -28,7 +29,7 @@ def test_numeric_empty_headers_and_mixed_blanks_via_shape_vote() -> None:
         ["", "9876543210", "", "226002", "BP 117/82"],
         ["3972 0583 9628", "", "person.b@example.org", "", "plt 1,45,000"],
     ]
-    kinds = classify_csv_columns(header, rows)
+    kinds = classify_csv_columns(header, rows, ChannelEvidence())
     assert kinds[0] == "AADHAAR"
     assert kinds[1] == "PHONE"
     assert kinds[2] == "EMAIL"

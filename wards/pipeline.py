@@ -28,11 +28,15 @@ from wards.channels import (
 )
 from wards.columns import (
     build_fhir_fullurl_map,
+    classify_address_value_shape,
     classify_csv_columns,
     classify_header_tokens,
     classify_json_key,
+    collect_list_preserve_overrides,
+    find_non_patient_mrn_cols,
     is_metadata_key,
     json_dict_key_context,
+    json_leaf_has_known_meaning,
 )
 from wards.config import (
     BASE64_BINARY_REASON,
@@ -41,6 +45,7 @@ from wards.config import (
     BASE64_MAX_DEPTH,
     BASE64_MIN_EXPLICIT_LEN,
     BASE64_MIN_LEN,
+    COLUMN_VOTE_SAMPLE_CAP,
     LOCATION_DETAIL_KINDS,
     NUMERIC_REDACTION_SENTINEL,
     PLACEHOLDERS,
@@ -68,10 +73,17 @@ from wards.generalise import (
 from wards.ingest import ParsedInput, is_json_content, json_pointer_escape, read_and_parse
 from wards.linkage import RecordEvidence, link_records, normalise_name_key, normalise_strong_id
 from wards.names import extract_name_candidates, redact_names
-from wards.patterns import extract_mrn_tokens, find_identifier_spans, redact_identifiers, split_data_uri_base64
+from wards.patterns import (
+    classify_value_shape,
+    extract_mrn_tokens,
+    find_identifier_spans,
+    redact_identifiers,
+    split_data_uri_base64,
+)
 from wards.pseudo import date_shift_days, pseudonym
 from wards.resources import MemorySampler
 from wards.slots import (
+    csv_slot_priorities,
     find_csv_slot,
     find_csv_slot_or_fallback,
     find_text_slot_span,
@@ -430,6 +442,7 @@ def _harvest_json_record_and_channels(
     input_rel: str,
     loc: str,
     parent_key: str | None = None,
+    preserve_overrides: dict[str, str | None] | None = None,
 ) -> RecordEvidence:
     """Walk one JSON record/document to feed Pass 1 ChannelEvidence and build RecordEvidence.
 
@@ -441,7 +454,7 @@ def _harvest_json_record_and_channels(
     dob_iso: str | None = None
 
     def _add_strong(kind: str, raw_val: str, key: str | None = None) -> None:
-        if key is not None and is_non_patient_id_key(key):
+        if key is not None and is_non_patient_id_key(key, preserve_overrides=preserve_overrides):
             return  # visit/bill/sample IDs are not patient evidence (R10)
         norm = normalise_strong_id(kind, raw_val)
         if norm is not None:
@@ -483,8 +496,13 @@ def _harvest_json_record_and_channels(
         ) -> Any:
             nonlocal dob_iso
             if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
-                if semantic in _STRONG_ID_KINDS:
-                    _add_strong(semantic, str(leaf_val), key)
+                eff_sem = semantic
+                if eff_sem == "FREE_TEXT":
+                    int_shape = classify_value_shape(str(leaf_val))
+                    if int_shape is not None:
+                        eff_sem = int_shape
+                if eff_sem in _STRONG_ID_KINDS:
+                    _add_strong(eff_sem, str(leaf_val), key)
                 return leaf_val
             if not isinstance(leaf_val, str) or not leaf_val.strip():
                 return leaf_val
@@ -513,21 +531,28 @@ def _harvest_json_record_and_channels(
                 elif insp.kind == _B64_REDACT and explicit_b64:
                     return leaf_val
 
-            if semantic == "PATIENT_NAME":
-                evidence.add_name(leaf_val, semantic)
+            eff_sem = semantic
+            if eff_sem == "PRESERVE_EXACT" and not cur_is_fhir and key is not None:
+                # decided once per key over its container's values; a lone value keeps the header meaning
+                ov = preserve_overrides.get(key) if preserve_overrides is not None else None
+                if ov is not None:
+                    eff_sem = ov
+
+            if eff_sem == "PATIENT_NAME":
+                evidence.add_name(leaf_val, eff_sem)
                 name_parts.append(leaf_val)
-            elif semantic == "RELATIVE":
-                evidence.add_name(leaf_val, semantic)
+            elif eff_sem == "RELATIVE":
+                evidence.add_name(leaf_val, eff_sem)
                 rel_parts.append(leaf_val)
-            elif semantic in _STRONG_ID_KINDS:
-                if semantic == "MRN":
+            elif eff_sem in _STRONG_ID_KINDS:
+                if eff_sem == "MRN":
                     evidence.add_mrn(leaf_val)
-                _add_strong(semantic, leaf_val, key)
-            elif semantic == "DOB":
+                _add_strong(eff_sem, leaf_val, key)
+            elif eff_sem == "DOB":
                 if dob_iso is None:
                     dob_iso = parse_dob_iso(leaf_val, order=date_order)
             elif (
-                semantic == "FREE_TEXT"
+                eff_sem == "FREE_TEXT"
                 and not looks_like_path_or_url(leaf_val)
                 and (key is None or not is_metadata_key(p_key, key))
             ):
@@ -582,8 +607,21 @@ def _harvest_parsed_evidence(
         assert parsed.rows is not None
         header = parsed.rows[0]
         body = parsed.rows[1:]
-        preferred_col = select_csv_slot_column(header, body)
-        col_types = classify_csv_columns(header, body)
+        col_priorities = csv_slot_priorities(header, body)
+        preferred_col = select_csv_slot_column(header, body, col_priorities)
+        col_types = classify_csv_columns(header, body, evidence)
+        non_patient_cols = find_non_patient_mrn_cols(header, body, col_types)
+        if preferred_col in non_patient_cols:
+            preferred_col = None
+        # Per-column decision, made once before the row loop: values of these columns are not patient evidence
+        sampled_body = body[:COLUMN_VOTE_SAMPLE_CAP]
+        non_evidence_cols = non_patient_cols | {
+            i
+            for i in range(len(header))
+            if is_non_patient_id_key(
+                header[i], [row[i].strip() for row in sampled_body if i < len(row) and row[i].strip()]
+            )
+        }
         file_order = infer_date_order(cell for row in body for cell in row)
         col_orders = [
             infer_date_order(row[idx] for row in body if idx < len(row))
@@ -598,8 +636,10 @@ def _harvest_parsed_evidence(
             rel_parts: list[str] = []
             dob_iso: str | None = None
 
-            slot = find_csv_slot(header, row, preferred_col=preferred_col)
-            if slot is not None:
+            slot = find_csv_slot(
+                header, row, preferred_col=preferred_col, col_priorities=col_priorities, excluded_cols=non_patient_cols
+            )
+            if slot is not None and slot[0] not in non_patient_cols:
                 evidence.add_mrn(slot[1])
                 slot_kind = col_types[slot[0]] if slot[0] < len(col_types) else "MRN"
                 id_type = slot_kind if slot_kind in _STRONG_ID_KINDS else "MRN"
@@ -620,7 +660,7 @@ def _harvest_parsed_evidence(
                 elif col_kind in _STRONG_ID_KINDS:
                     if col_kind == "MRN":
                         evidence.add_mrn(cell)
-                    if idx < len(header) and is_non_patient_id_key(header[idx]):
+                    if idx in non_evidence_cols:
                         continue  # visit/bill/sample IDs are not patient evidence (R10)
                     norm = normalise_strong_id(col_kind, cell)
                     if norm is not None:
@@ -683,6 +723,7 @@ def _harvest_parsed_evidence(
         else:
             for key, val in parsed.data.items():
                 if isinstance(val, list) and val and all(isinstance(item, dict) for item in val):
+                    list_overrides = collect_list_preserve_overrides(val)
                     for idx, item in enumerate(val):
                         recs.append(
                             _harvest_json_record_and_channels(
@@ -695,6 +736,7 @@ def _harvest_parsed_evidence(
                                 input_rel=parsed.rel_posix,
                                 loc=f"/{key}/{idx}",
                                 parent_key=key,
+                                preserve_overrides=list_overrides,
                             )
                         )
                         next_record_id += 1
@@ -772,6 +814,7 @@ def _clean_json_values(
     parent_key: str | None = None,
     b64_depth: int = 0,
     use_name_evidence: bool = False,
+    preserve_overrides: dict[str, str | None] | None = None,
 ) -> Any:
     """Clean JSON keys, shift dates, generalise QIs, and clean text/base64 via shared walker. O(nodes).
 
@@ -868,6 +911,12 @@ def _clean_json_values(
                     generalised = True
                 return PLACEHOLDERS[semantic]
             if semantic == "PRESERVE_EXACT":
+                if not preserve_fhir_refs and key is not None:
+                    # decided once per key over its container's values; a lone value keeps the header meaning
+                    ov = preserve_overrides.get(key) if preserve_overrides is not None else None
+                    if ov is not None and ov in PLACEHOLDERS:
+                        stats.identifiers_detected += 1
+                        return PLACEHOLDERS[ov]
                 shifted, _ = shift_dates_in_text(
                     leaf_val,
                     offset_days,
@@ -886,7 +935,21 @@ def _clean_json_values(
             else:
                 raw_cleaned = _clean_text_step(leaf_val, apply_evidence=use_name_evidence)
             handled, b64_out = _clean_b64_leaf(raw_cleaned, is_attachment=False)
-            return b64_out if handled else raw_cleaned
+            if handled:
+                return b64_out
+            if not json_leaf_has_known_meaning(p_key, key):
+                addr_shape = classify_address_value_shape(raw_cleaned)
+                if addr_shape == "ADDRESS":
+                    addr, cnt = generalise_address_field(raw_cleaned, policy.location_level, policy.pin_prefix_digits)
+                    if cnt > 0:
+                        stats.identifiers_detected += cnt
+                        generalised = True
+                    return addr
+                if addr_shape in LOCATION_DETAIL_KINDS:
+                    generalised = True
+                    stats.identifiers_detected += 1
+                    return PLACEHOLDERS[addr_shape]
+            return raw_cleaned
 
         if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
             if semantic == "AGE":
@@ -900,6 +963,11 @@ def _clean_json_values(
             if semantic in _STRUCTURED_PII_KINDS or semantic == "DOB":
                 stats.identifiers_detected += 1
                 return NUMERIC_REDACTION_SENTINEL
+            if semantic == "FREE_TEXT":
+                int_shape = classify_value_shape(str(leaf_val))
+                if int_shape in _STRONG_ID_KINDS:
+                    stats.identifiers_detected += 1
+                    return NUMERIC_REDACTION_SENTINEL
         return leaf_val
 
     def _on_dict_keys(orig_keys: list[str], p_key: str | None) -> list[str]:
@@ -940,8 +1008,12 @@ def _process_csv(
     assert eff_policy is not None
     header = parsed.rows[0]
     body = parsed.rows[1:]
-    preferred_col = select_csv_slot_column(header, body)
-    col_types = classify_csv_columns(header, body)
+    col_priorities = csv_slot_priorities(header, body)
+    preferred_col = select_csv_slot_column(header, body, col_priorities)
+    col_types = classify_csv_columns(header, body, evidence)
+    non_patient_cols = find_non_patient_mrn_cols(header, body, col_types)
+    if preferred_col in non_patient_cols:
+        preferred_col = None
     file_order = infer_date_order(cell for row in body for cell in row)
     col_orders = [
         infer_date_order(row[idx] for row in body if idx < len(row))
@@ -960,7 +1032,9 @@ def _process_csv(
         if link_map is not None and (parsed.rel_posix, raw_loc) in link_map:
             psn, offset_days = link_map[(parsed.rel_posix, raw_loc)]
         else:
-            slot = find_csv_slot(header, row, preferred_col=preferred_col)
+            slot = find_csv_slot(
+                header, row, preferred_col=preferred_col, col_priorities=col_priorities, excluded_cols=non_patient_cols
+            )
             psn = make_psn(slot[1]) if slot is not None else None
             offset_days = 0
 
@@ -969,6 +1043,8 @@ def _process_csv(
             row,
             col_types,
             preferred_col=preferred_col,
+            col_priorities=col_priorities,
+            excluded_cols=non_patient_cols,
             allow_name_fallback=(psn is not None),
         )
 
@@ -1059,9 +1135,14 @@ def _claim_json_slot(
     target: Any,
     psn: str | None,
     protected: set[tuple[int, str]],
+    *,
+    preserve_overrides: dict[str, str | None] | None = None,
 ) -> str | None:
     """Write PSN (or null-slot placeholder) and return emitted PSN only if a slot holds it (R11). O(1)."""
-    prot = slot_writer(target, _slot_value(psn), allow_name_fallback=psn is not None)
+    if preserve_overrides is not None:
+        prot = slot_writer(target, _slot_value(psn), allow_name_fallback=psn is not None, preserve_overrides=preserve_overrides)
+    else:
+        prot = slot_writer(target, _slot_value(psn), allow_name_fallback=psn is not None)
     if prot is not None:
         protected.add(prot)
         return psn
@@ -1144,6 +1225,7 @@ def _process_json(
     for key, val in data.items():
         out_key = top_key_map[key]
         if isinstance(val, list) and val and all(isinstance(item, dict) for item in val):
+            list_overrides = collect_list_preserve_overrides(val)
             # Never emit a raw PII key into a records.jsonl pointer (SPEC sec 6 / D5)
             escaped_key = json_pointer_escape(str(out_key))
             out_items: list[Any] = []
@@ -1155,7 +1237,13 @@ def _process_json(
                     else (None, 0)
                 )
                 item_prot: set[tuple[int, str]] = set()
-                emitted_psn = _claim_json_slot(write_json_slot_psn, item, psn, item_prot)
+                emitted_psn = _claim_json_slot(
+                    write_json_slot_psn,
+                    item,
+                    psn,
+                    item_prot,
+                    preserve_overrides=list_overrides,
+                )
                 cleaned_item = _clean_json_values(
                     item,
                     stats,
@@ -1166,6 +1254,7 @@ def _process_json(
                     date_order,
                     preserve_fhir_refs=False,
                     parent_key=key,
+                    preserve_overrides=list_overrides,
                 )
                 out_items.append(cleaned_item)
                 recs.append(

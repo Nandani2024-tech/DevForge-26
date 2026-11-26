@@ -144,6 +144,26 @@ BASE64_BINARY_REASON = "base64_binary_redacted"
 BASE64_INVALID_REASON = "base64_invalid_redacted"
 BASE64_DEPTH_REASON = "base64_depth_exceeded"
 
+# R5 structured column value-shape voting thresholds (bounded O(cap * cols))
+COLUMN_VOTE_SAMPLE_CAP = 200
+COLUMN_VOTE_MIN_RATIO = 0.5
+# Minimum distinct-value share of non-empty sampled cells required for an ID-shaped column to override
+# a PRESERVE_EXACT/facility header (low-cardinality repeated facility/department codes stay preserved).
+COLUMN_ID_MIN_CARDINALITY_RATIO = 0.5
+# A column/key-level ID decision needs at least this many values: one value carries no
+# cardinality evidence (1 distinct of 1), so it never overrides the header meaning.
+COLUMN_ID_MIN_VALUES = 2
+# A large column with repeat visits has a low distinct share but many distinct values; this many
+# distinct ID-shaped values is enough on its own (above the size of a facility/department code set).
+COLUMN_ID_MIN_DISTINCT = 10
+COLUMN_NAME_MAX_TOKENS = 5
+
+# Patient-ID slot priorities (wards/slots.py): primary meaning wins, then secondary, then shape vote.
+SLOT_PRIORITY_EXCLUDED = -1
+SLOT_PRIORITY_NEUTRAL = 0
+SLOT_PRIORITY_PRIMARY = 1
+SLOT_PRIORITY_SECONDARY = 2
+
 # Generic R7/R8 linguistic constants (never harvested from dev inputs)
 NAME_LABELS = (
     "Patient Name",
@@ -633,6 +653,9 @@ NON_NAME_WORDS = frozenset(
 # so two different values in one cluster are a conflict. Every other strong-ID type is a link
 # edge only and never a conflict.
 LINK_LIFELONG_ID_TYPES = frozenset({"aadhaar", "abha", "pan"})
+# Primary facility-level patient identifier kind paired with LINK_LIFELONG_ID_TYPES as D9 anchor keys.
+PRIMARY_ID_TYPE = "MRN"
+LINK_ANCHOR_ID_KINDS = frozenset({t.upper() for t in LINK_LIFELONG_ID_TYPES}) | {PRIMARY_ID_TYPE}
 # Contact handles can be shared inside a family; on a conflict they are dropped before
 # per-issuer IDs (hospital MRN/UHID/IPD, insurance policy numbers).
 LINK_CONTACT_ID_TYPES = frozenset({"phone", "email", "abha_address"})
@@ -658,6 +681,8 @@ SEX_LABEL_WORDS = ("sex", "gender", "ling", "लिंग")
 SEX_VALUE_WORDS = ("m", "f", "male", "female", "पुरुष", "महिला", "स्त्री")
 DISTRICT_MARKER_WORDS = ("distt.", "distt", "district", "जिला")
 TEHSIL_MARKER_WORDS = ("tehsil", "तहसील")
+# Upper length bound on single-cell/leaf address value-shape classification so clinical paragraphs never trigger it.
+ADDRESS_VALUE_MAX_LEN = 180
 # policy.yaml location_level value that keeps the tehsil (sub-district) as well as the district.
 LOCATION_LEVEL_TEHSIL = "tehsil"
 # Location parts below the kept level (house, locality, landmark, village): always removed, and a
