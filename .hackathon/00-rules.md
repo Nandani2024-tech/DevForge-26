@@ -1,5 +1,5 @@
 # 00-rules (Secret Wards, team Procrastinators). Imperative, one rule per line.
-Stack: Python 3.10-3.12, pip, pytest. Run: `python main.py --input <dir> --output <dir>` with RAKSHA_SECRET set. Test: `python -m pytest` (TBD after scaffold). Lint: TBD after scaffold. Kit: ../Secret-Wards-ToolKit.
+Stack: Python 3.10-3.12, pip, pytest. Run: `python main.py --input <dir> --output <dir>` with RAKSHA_SECRET set. Test: `python -m pytest` (pytest in requirements-dev.txt). Lint: none (README names pyflakes/pycodestyle, which are not in the manifest or Reuse Stack). Kit: ../Secret-Wards-ToolKit.
 ## 1. Before every task
 - Read .hackathon/01-brief.md, 00-rules.md, MISTAKES.md, DECISIONS.md (if present) and the task's handoff prompt.
 - State in 3 lines what you will do and which R-ids it serves.
@@ -13,6 +13,10 @@ Stack: Python 3.10-3.12, pip, pytest. Run: `python main.py --input <dir> --outpu
 ## 4. Real implementation
 - No hardcoded outputs, no special-casing of dev or test inputs, no stubs that return fake success. Every function uses its inputs.
 - Never put dev names, IDs, header names or file names in code or config. Detect by context, column meaning and value shape (R22).
+- Every word in a code or config word list needs a non-dev source (language, standard or schema, clinical vocabulary, OS). Never add a word because check_dev showed a leak or a false positive.
+- Fix a false positive or a miss by changing the rule (shape, context or run-time evidence), and add a test with an invented word, absent from dev/input, that proves the rule generalises.
+- Only Claude or the user, in review, edits tests/r22_vocab_allowlist.txt and the swap-test fixtures.
+- A guard test fails when its fixture is missing; it never returns early.
 - Read RAKSHA_SECRET only from the environment. If it is missing, exit non-zero. Never write, print, log or hash-and-store it.
 - Policy values come from config/policy.yaml. Other constants are named and live in one module.
 - Paths via pathlib only. Never build paths with string concatenation or '\\'.
@@ -49,4 +53,5 @@ Stack: Python 3.10-3.12, pip, pytest. Run: `python main.py --input <dir> --outpu
 - List the files changed and any shortcut taken (expected: none).
 - If you replaced an approach, algorithm or library already in place, add `APPROACH CHANGED:` (was / now / why). Never reintroduce anything superseded in DECISIONS.md.
 ## 13. Allowed exceptions
-- (none). Only the user adds entries; each needs what, why, where and a removal plan.
+- Only the user adds entries; each needs what, why, where and a removal plan.
+- E1 (user-approved 2026-11-26): what: wards/cli.py strips one pair of outer single quotes from --input/--output, only when os.name == "nt" | why: the kit's check_submission.py uses POSIX shlex.quote with shell=True, so cmd.exe passes literal quotes on Windows dev machines | where: wards/cli.py, one function | removal: delete it once check_submission runs under WSL/Linux only.

@@ -16,7 +16,7 @@ STATUS: LOCKED (changes only via /pivot-check)
 ## Decision
 - Chosen: B. Highest total, Feasibility 5, deterministic and explainable in the viva, and every R-id is reachable with the Reuse Stack (stdlib + psutil now; rapidfuzz/jellyfish in V1).
 - Plan B: D (C is ineligible at Feasibility 2). D reuses B's ingest, linkage and privacy layer and swaps only the free-text detector.
-- Switch trigger: if after the Task 2 /ship check_dev still shows > 25% of PII visible overall or 4/4 canaries, switch the free-text detector to D's allowlist mode for patient-bearing text fields.
+- Switch trigger: if after the Task 2 /verify-commit check_dev still shows > 25% of PII visible overall or 4/4 canaries, switch the free-text detector to D's allowlist mode for patient-bearing text fields.
 ## Riskiest assumption and spike
 - Assumption: every patient-bearing record type (CSV/TSV row, JSON record, text note, FHIR Bundle) has an existing ID or name slot. Writing the pseudonym there keeps header, column count, key paths, value types and line count (R3) and makes the claim visible (R11).
 - 15-minute test (inside Task 1 "scaffold"): with a dummy record-level key, write PSN-XXXXXX into the first ID-like column/key/label line of each record. Run validate_output, check_dev, and a script that checks each records.jsonl claim against its exported record.
@@ -63,7 +63,7 @@ STATUS: LOCKED (changes only via /pivot-check)
 - V2 check_dev summary. Action: read the leak / kept / linking numbers vs the starter.
 - V3 validate_output + check_submission. Action: confirm CONTRACT OK and READY TO SUBMIT.
 - V4 before/after diff of one input vs sanitized file (`git diff --no-index`). Action: show the judges a redaction. UI kit: none (stdlib; N9 later).
-## Build order hint (exactly 3 tasks, each one /handoff-prompt + one /ship)
+## Build order hint (exactly 3 tasks, each one /handoff-prompt + one /verify-commit)
 1. scaffold (spike): starter-based package, raksha.toml (name Procrastinators), requirements.txt + requirements-dev.txt, policy.yaml defaults, .gitignore, psutil RSS, Python 3.10-safe, hardened ingest/quarantine, honest report/records, exit codes, pytest over kit tools + 02-domain oracles, stub README, ID-slot PSN spike. Covers R1-R3, R15, R16, R19-R21, R23.
 2. detection: column-semantics classifier (header words + value shape), ID/phone digit-core regexes with Devanagari digits, label/relation/honorific name rules, preserve rules (Dr., doses, 1-0-1, C/O complaint, K/C/O), applied to content, headers, keys, metadata and file names; PII-free logging. Covers R5-R9, R17.
 3. linkage + privacy: pass-1 evidence, strong-key union-find + name+DOB with a conflict guard, canonical key and PSN in the ID slot + records.jsonl, format-preserving per-patient date shift (per-record fallback), DOB shift, age bands, district + PIN prefix. Covers R10-R13; then the V0 exit gate.
@@ -72,3 +72,5 @@ STATUS: LOCKED (changes only via /pivot-check)
 - Drift: Presidio/spaCy/splink/pycanon/dateparser; CRF training; Mondrian; surrogate fake names; adding a new pseudonym column (breaks schema); multiprocessing (determinism); raising the recursion limit; any dev name, header or file list in code; V1 items before the V0 gate passes.
 ## Proposed spec changes
 - none to 01-ps.md. Resolved 2026-11-26 (user): (1) R4, R14, R18, R22, R24, R25 in NICE: APPROVED. (2) V0 gate excludes the base64 channel until N4; Task 2 unchanged: ACCEPTED. (3) R20 and R23 in MUST: APPROVED.
+## Change log
+- 2026-11-26 19:55 (user-approved, scope unchanged): N7 (R22 mutation harness) also carries the R22 token-swap invariance test deferred from /unstick route C. Replace each non-PII dev word in file names, headers and keys with an invented word of the same shape, absent from dev/input. Running the pipeline on both trees must give the same rename and redaction decisions. Until N7, the AST vocabulary-overlap ratchet (route B, D6) guards R22.

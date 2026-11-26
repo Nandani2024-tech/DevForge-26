@@ -53,7 +53,7 @@ test | test framework | pytest | 9.2.0 | pip install pytest==9.2.0 (requirements
 - Custom transliteration was tested on 12 hand-made names only. Medial-schwa misses (Shabnam) will lower cross-script link recall; measure on dev with check_dev.
 - No paid APIs or keys. All wheels are verified on PyPI for Windows + Linux. setup is about 1-2 min (pip of 4 small wheels).
 ## Resolved unknowns
-- 02-domain gap, psutil: works for tree peak RSS on Windows; same API on Linux (Linux not smoke-tested: verify under WSL before /ship).
+- 02-domain gap, psutil: works for tree peak RSS on Windows; same API on Linux (Linux not smoke-tested: verify under WSL before /verify-commit).
 - 02-domain gap, fhir.resources: offline, 9 ms per bundle, but R4B only and lax on value sets. Test-only.
 - 02-domain gap, transliteration: custom map >= library on a hand sample. BUILD custom.
 - 01-ps R4 acceptance says "fhir.resources parse + reference-resolution check". Propose "fhir.resources R4B parse + own value-set and reference-resolution check". NEEDS USER APPROVAL.

@@ -1,0 +1,91 @@
+# DECISIONS (approach changes, newest last)
+~~~
+### D1 | 2026-11-26 16:57 | R1,R2,R3,R15,R16,R19,R20,R21 | modular wards/ package instead of starter single-file main.py
+- Was: kit starter single-file main.py (not built in this repo)
+- Now: thin main.py -> wards/ package (config, pseudo, resources, ingest, slots, writers, pipeline, cli)
+- Why: separates config, HMAC pseudonyms, psutil tree-RSS sampling, safe ingest/quarantine, slot replacement and writers for Tasks 2 and 3 (Antigravity report); stays within LOCKED Decision B
+- Trigger: ship
+- Obsolete: none
+- Lesson: keep the single entry point thin; one module per concern
+~~~
+~~~
+### D2 | 2026-11-26 17:20 | R3,R15,R22 | slot column chosen by meaning tokens + value-shape vote
+- Was: exact header-name sets in wards/slots.py (built, never committed)
+- Now: generic ID-meaning tokens (uhid/mrn, patient|pt + id|no|ref, reg|ipd|opd|adm + id|no) plus a per-column value-shape vote
+- Why: hardcode-check and scope FAIL (Kill list: dev header list in code); renamed-header tests now pass (tests/test_slots_generic.py)
+- Trigger: ship
+- Obsolete: none (old sets already removed)
+- Lesson: never classify columns by a list of full header names
+~~~
+~~~
+### D3 | 2026-11-26 17:50 | R5,R6 | column/key meaning classifier + R6 pattern engine replace starter regexes
+- Was: starter 5-regex clean_text in wards/pipeline.py (commit 21ffd7e)
+- Now: wards/columns.py (header/key meaning tokens + per-column value-shape vote) and wards/patterns.py (Devanagari-digit-aware ID/phone regexes with typed placeholders)
+- Why: check_dev leak 62.7% -> 16.0%, AADHAAR/ABHA/PAN/INSURANCE/EMAIL/DOB/VILLAGE/PIN 0%, medical kept 100%, F0.5 0.95 (Antigravity report, reproduced by verify-commit)
+- Trigger: ship
+- Obsolete: _BASELINE_PATTERNS in wards/pipeline.py (already removed)
+- Lesson: classify by meaning + value shape, and keep span bookkeeping linear
+~~~
+~~~
+### D4 | 2026-11-26 19:28 | R9 (R5,R6,R7) | two-pass pipeline: Pass 1 harvests name tokens and MRN cores, Pass 2 cleans channels
+- Was: single-pass run_pipeline (commit b03b767)
+- Now: Pass 1 parses every file and keeps only ChannelEvidence (PATIENT_NAME/RELATIVE tokens and phrases, >=5-digit MRN cores); Pass 2 re-reads, cleans content + file/folder names, headers, keys and path metadata, with a deterministic rename map
+- Why: unlabelled names and MRN tails in file names, headers and keys can't be told apart from clinical words without run-time content evidence; measured on an LF copy of dev/input: filename 0/48, header 0/8, key 0/12, metadata 0/40 leaked (was 100%)
+- Trigger: ship
+- Obsolete: none
+- Lesson: hidden-channel detection uses evidence harvested from the same run, never word lists from the practice data
+~~~
+~~~
+### D5 | 2026-11-26 19:37 | R15,R17,R9 | records.jsonl loc uses the cleaned key under a PII top-level key
+- Was: SPEC sec 6 reading: loc = raw input locator, so the JSON pointer carries the original key even when that key holds PII (not built)
+- Now: when a top-level key holding a record list contains PII, loc is written with the cleaned key (current pipeline.py behaviour, kept)
+- Why: user decision. SPEC sec 7 scans records.jsonl for PII; a leak there costs a penalty and channel hygiene, while an unmatched loc only loses linking credit on those rare records (0 dev records affected)
+- Trigger: user
+- Obsolete: none
+- Lesson: when contract fidelity and PII hygiene conflict, keep the output PII-free and accept the smaller scoring loss
+~~~
+~~~
+### D6 | 2026-11-26 19:55 | R22,R9 | R22 guard: AST vocabulary-overlap ratchet against a reviewed allowlist
+- Was: tests/test_no_dev_strings.py only (truth PII surfaces of 6+ chars; returns early when truth.json is missing) (commit bacdc86)
+- Now: it is kept and fails when its fixture is missing. A new test, tests/test_r22_vocab_overlap.py, pulls word tokens from the non-docstring string literals in main.py, wards/ and config/. Any token that is a dev file-name token or appears in 1-3 dev input files must have a (word, file, owner) line in tests/r22_vocab_allowlist.txt naming a non-dev source. The allowlist is seeded in review (218 entries; 51 dev-tuned uses left out) and only Claude or the user edits it; the hardcode gate flags any other edit.
+- Why: /unstick on R22 (seen 5). 45 of 646 word literals in wards/ were dev file-name tokens and the old guard passed; CHANNEL_SAFE_WORDS (42/110) and NON_MRN_CHANNEL_PREFIXES (14/24) came from dev file names
+- Trigger: unstick
+- Obsolete: NON_MRN_CHANNEL_PREFIXES; the dev-tuned entries of CHANNEL_SAFE_WORDS; dengue in CLINICAL_HEAD_NOUNS; the early return in test_no_dev_strings.py
+- Lesson: guard against dev tuning with a reviewed ratchet on vocabulary, not a check for PII values only. The behavioural token-swap test (route C) is deferred to N7 (V1), see the 04-idea-scope change log
+~~~
+~~~
+### D7 | 2026-11-26 20:49 | R9,R22 | <letters>-<year> channel tokens: allow-rule on ID meaning instead of a deny-list
+- Was: NON_MRN_CHANNEL_PREFIXES deny-list of dev file-name words skipped "<word>-<19xx|20xx>" as MRN (not committed)
+- Now: in channel mode such a token is an MRN only when its letters are an ID-meaning token (CHANNEL_ID_PREFIXES = the columns.py ID vocabulary) or its digits are a harvested MRN core
+- Why: the deny-list kept "dengue-2026" but redacted the unseen "malaria-2026" (test_r9_r22_condition_year_filename_is_not_an_mrn); 57/57 tests pass and filename leak stays 0/48 on dev
+- Trigger: ship
+- Obsolete: NON_MRN_CHANNEL_PREFIXES (removed)
+- Lesson: decide by meaning that applies to unseen words (allow-rule), never by excluding the words the practice data happens to use
+~~~
+~~~
+### D8 | 2026-11-26 21:40 | R10,R11,R12,R13 | cluster-key pseudonyms + per-patient date shift and QI generalisation replace the scaffold slot key and DOB/PIN placeholders
+- Was: per-record slot key `slot:<normalised ID>` (wards/pseudo.py slot_patient_key, commit 21ffd7e) and Task 2 DOB/PIN placeholders (commit bacdc86)
+- Now: Pass 1 RecordEvidence -> union-find over strong IDs, name+DOB and name+relative with a conflict guard -> canonical cluster key -> HMAC PSN (wards/linkage.py); per-patient HMAC date offset with format-preserving rewrite (wards/dates.py); age bands with top-code, district kept, PIN prefix (wards/generalise.py)
+- Why: 04-idea-scope Design decisions (a)/(b) and Task 3. Measured in the working tree (not committed, /verify-commit BLOCKED): check_submission READY TO SUBMIT with keyed outputs, but check_dev F0.5 0.95 -> 0.35, PIN leak 0% -> 17.6%, MRN 1.1% -> 3.5%, so the approach stands and its conflict guard and detector hand-offs need fixing
+- Trigger: ship
+- Obsolete: slot_patient_key (already removed); PLACEHOLDERS["DOB"]/["PIN"] use for structured DOB/PIN fields
+- Lesson: when a new stage takes over from a detector, measure the old detector's channel before and after
+~~~
+~~~
+### D9 | 2026-11-26 22:30 | R10,R11 | conflict guard on lifelong IDs + DOB only, in edge tiers; per-issuer IDs keyed by digit core
+- Was: any two values of one strong-ID type in a cluster are a conflict (02-domain sec 4 R10 wording; working tree of D8, not committed); per-issuer IDs keyed by letters+digits
+- Now: only lifelong IDs (Aadhaar, ABHA, PAN; config.LINK_LIFELONG_ID_TYPES) and DOB conflict. A conflicting component is re-clustered in stages that drop weak name edges, then contact handles (config.LINK_CONTACT_ID_TYPES), then per-issuer IDs; the canonical key uses only the stage's edge types, so split groups never share a key. MRN/UHID/IPD/insurance key on their digit core. Visit/bill/sample columns and keys (slots.is_non_patient_id_key) are never patient evidence
+- Why: check_dev F0.5 0.35 -> 0.96 (recall 0.10 -> 0.84), precision 1.00, wrong merges 0; one patient has different MRNs at different hospitals, so a same-type MRN rule split every cross-hospital cluster
+- Trigger: user (fixes applied in review, user-approved)
+- Obsolete: _LIFELONG_STRONG_TYPES and the 3-stage hand-written split in link_records (removed)
+- Lesson: only identifiers that are one-per-person may veto a merge; per-issuer IDs are evidence, never a veto
+~~~
+~~~
+### D10 | 2026-11-26 21:47 | R12,R13 | text date order from run-wide evidence; invalid ages get the placeholder
+- Was: infer_date_order voted only inside one text file and fell back to day-first; an age above MAX_VALID_AGE was left raw, a negative one banded (commit 1f885cf)
+- Now: a text file's own votes decide first; with none, the certain dates of records linked to the same patient pick the reading of its ambiguous dates; then the files of the same export family (same folder, same name with digit runs masked); day-first only without evidence (pipeline._decide_text_date_orders, dates.resolve_date_order). Ages outside [MIN_VALID_AGE, MAX_VALID_AGE] become [AGE]
+- Why: R12 acceptance 338/339 -> 339/339 records with exact intervals, shifts outside policy 2 -> 0; R13 1/448 -> 0/447 bands excluding the true age; check_dev numbers unchanged
+- Trigger: user (fix round after the post-commit acceptance measurement)
+- Obsolete: per-file-only order decision for text in Pass 2; .hackathon/bench/acc_r11_r13.py is superseded by tests/test_acceptance_r11_r13.py
+- Lesson: an ambiguous value is decided by the strongest evidence in the run, not by a default
+~~~
