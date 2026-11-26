@@ -6,13 +6,22 @@ import unicodedata
 from bisect import bisect_left
 
 from wards.config import (
+    ATTENDANT_ACTION_VERBS,
+    CHANNEL_SAFE_WORDS,
     CLINICAL_HEAD_NOUNS,
     COMPLAINT_WORDS,
+    DEVA_SYMPTOM_WORDS,
+    DEVA_TIME_UNITS,
+    DOCUMENT_SUBJECT_NOUNS,
+    HINGLISH_SUBJECT_MARKERS,
+    KCO_HO_WINDOW_CHARS,
     NAME_LABELS,
     NAME_LABEL_STOP_WORDS,
     NON_NAME_WORDS,
     PLACEHOLDERS,
+    PRE_REL_LOOKBACK_CHARS,
     PREFIX_HONORIFICS,
+    REFERRAL_CLINICAL_VERBS,
     RELATIVE_LABELS,
     SUFFIX_HONORIFICS,
 )
@@ -32,6 +41,12 @@ _REL_LABELS_CF = frozenset(lbl.casefold() for lbl in RELATIVE_LABELS)
 _STOP_WORDS_ALT = "|".join(
     re.escape(w) for w in sorted(set(NAME_LABEL_STOP_WORDS) | set(NAME_LABELS) | set(RELATIVE_LABELS), key=len, reverse=True)
 )
+_REFERRAL_VERBS_ALT = "|".join(re.escape(v) for v in REFERRAL_CLINICAL_VERBS)
+_DOC_NOUNS_ALT = "|".join(re.escape(n) for n in DOCUMENT_SUBJECT_NOUNS)
+_ATT_VERBS_ALT = "|".join(re.escape(v) for v in ATTENDANT_ACTION_VERBS)
+_DEVA_TIME_ALT = "|".join(re.escape(u) for u in DEVA_TIME_UNITS)
+_DEVA_SYMP_ALT = "|".join(re.escape(s) for s in DEVA_SYMPTOM_WORDS)
+_HINGLISH_MKR_ALT = "|".join(re.escape(m) for m in HINGLISH_SUBJECT_MARKERS)
 
 # Protect-mask patterns (R8): run first so medical facts, doctors, and placeholders stay untouched
 _FAST_PROTECT_RE = re.compile(
@@ -44,7 +59,7 @@ _KCO_HO_START_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9/])(?:No[ \t]+)?(?:N/K/C/O|K/C/O|H/O)[ \t]*:?[ \t]*"
 )
 _KCO_HO_STOP_RE = re.compile(
-    rf"(?i)[\n\r.;|]|,[ \t]*(?:brought|accompanied|witnessed|attended|referred|reviewed)\b|"
+    rf"(?i)[\n\r.;|]|,[ \t]*(?:{_REFERRAL_VERBS_ALT})\b|"
     rf"[ \t]+by\b|(?<![A-Za-z0-9_\u0900-\u097f])(?:{_PRE_HON_ALT})\b|"
     rf"(?<![A-Za-z0-9])[SDWC][ \t]*/[ \t]*[Oo]\b|"
     rf"(?<![A-Za-z0-9_\u0900-\u097f])(?:{_STOP_WORDS_ALT})[ \t]*:"
@@ -54,6 +69,12 @@ _DOCTOR_PROTECT_RE = re.compile(
     rf"(?P<doc>{_NAME_TOK}(?:[ \t]+{_NAME_TOK}){{0,2}})"
     r"(?:[ \t]*\([^)\n\r]{1,40}\))?",
 )
+_DOCTOR_CHANNEL_PROTECT_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9\u0900-\u097f])(?:Dr\.?|डॉ\.?)[ \t_]+"
+    rf"(?P<doc>{_NAME_TOK}(?:[ \t_]+{_NAME_TOK}){{0,2}})"
+)
+_CHANNEL_DOC_TOK_RE = re.compile(r"[^ \t_]+")
+_DOCTOR_STOP_WORDS = frozenset(CHANNEL_SAFE_WORDS) | frozenset(NON_NAME_WORDS) | frozenset(NAME_LABEL_STOP_WORDS)
 _POSSESSIVE_EPONYM_RE = re.compile(
     rf"\b(?P<eponym>{_TITLE_LATIN})['\u2019]s?[ \t]+(?P<head>[A-Za-z]+)\b"
 )
@@ -81,8 +102,8 @@ _ANY_LABEL_RE = re.compile(
 # - "<action> by <Name>": passive-voice clinical/contact verbs naming a caller/attendant/witness
 _INLINE_PROSE_LABEL_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_\u0900-\u097f])"
-    r"(?:(?:summary|record|report|note|visit|case)[ \t]+(?:for|of)|"
-    r"(?:accompanied|brought|witnessed|attended|signed|called|contacted|informed|reported)[ \t]+by)[ \t]+"
+    rf"(?:(?:{_DOC_NOUNS_ALT})[ \t]+(?:for|of)|"
+    rf"(?:{_ATT_VERBS_ALT})[ \t]+by)[ \t]+"
 )
 
 # Pass B: Relation markers (matches ONLY the marker, then extracts bounded name span)
@@ -116,11 +137,11 @@ _ATTENDANT_PAREN_RE = re.compile(
 )
 _DEVA_SUBJECT_KO_RE = re.compile(
     rf"{_BOUNDARY_L}(?P<name>{_DEVA_TOK}(?:[ \t]+{_DEVA_TOK}){{0,2}})[ \t]+को[ \t]+"
-    r"(?:\d+[ \t]+(?:दिन|सप्ताह|माह|महीने|वर्ष)|(?:बुखार|दर्द|खांसी|जुकाम|कमजोरी|चक्कर|उल्टी|दस्त|सूजन|सांस))"
+    rf"(?:\d+[ \t]+(?:{_DEVA_TIME_ALT})|(?:{_DEVA_SYMP_ALT}))"
 )
 _HINGLISH_SUBJECT_KA_RE = re.compile(
     rf"{_BOUNDARY_L}(?P<name>{_TITLE_LATIN}(?:[ \t]+{_TITLE_LATIN}){{0,1}})[ \t]+(?:ka|ki|ke)[ \t]+"
-    r"(?:BP|pulse|temp|spo2|RBS|Hb|condition|tabiyat|halat|bukhar|dard|report|weight)\b",
+    rf"(?:{_HINGLISH_MKR_ALT})\b",
     re.IGNORECASE,
 )
 _POSSESSIVE_ATTENDANT_RE = re.compile(
@@ -253,9 +274,9 @@ def _build_protect_mask(text: str) -> bytearray:
         for m in rx.finditer(text):
             _mark(m.start(), m.end())
 
-    # K/C/O and H/O protect only the clinical term list immediately following the marker (max 80 chars)
+    # K/C/O and H/O protect only the clinical term list immediately following the marker (bounded window)
     for m in _KCO_HO_START_RE.finditer(text):
-        win_end = min(len(text), m.end() + 80)
+        win_end = min(len(text), m.end() + KCO_HO_WINDOW_CHARS)
         stop_m = _KCO_HO_STOP_RE.search(text, m.end(), win_end)
         end = stop_m.start() if stop_m is not None else win_end
         _mark(m.start(), end)
@@ -320,7 +341,7 @@ def _collect_name_spans(text: str) -> list[tuple[int, int, str]]:
         if marker.startswith(("s", "d", "w")):
             li = bisect_left(line_ends, m.start())
             line_start = line_ends[li - 1] + 1 if li > 0 else 0
-            win_start = max(line_start, m.start() - 80)
+            win_start = max(line_start, m.start() - PRE_REL_LOOKBACK_CHARS)
             pre_m = _PRE_REL_NAME_RE.search(text, win_start, m.start())
             if pre_m is not None:
                 raw_pre = pre_m.group("name")
@@ -371,7 +392,7 @@ def _collect_name_spans(text: str) -> list[tuple[int, int, str]]:
     return spans
 
 
-def _nfc_with_offset_map(text: str) -> tuple[str, list[int], list[int]]:
+def nfc_with_offset_map(text: str) -> tuple[str, list[int], list[int]]:
     """Normalise text to NFC for matching and build 1-to-1 char index bounds back to text.
 
     Complexity: O(len(text)).
@@ -394,6 +415,46 @@ def _nfc_with_offset_map(text: str) -> tuple[str, list[int], list[int]]:
     return "".join(nfc_parts), orig_starts, orig_ends
 
 
+def find_doctor_spans(text: str, *, allow_underscores: bool = False) -> list[tuple[int, int]]:
+    """Return R8 doctor-name character spans (start, end) to preserve in text. O(len(text))."""
+    if not text:
+        return []
+    if not allow_underscores:
+        return [(m.start(), m.end()) for m in _DOCTOR_PROTECT_RE.finditer(text)]
+
+    spans: list[tuple[int, int]] = []
+    for m in _DOCTOR_CHANNEL_PROTECT_RE.finditer(text):
+        doc_start = m.start("doc")
+        doc_str = m.group("doc")
+        doc_end = doc_start
+        kept_tokens = 0
+        for part_m in _CHANNEL_DOC_TOK_RE.finditer(doc_str):
+            tok = part_m.group(0)
+            if _clean_word_key(tok) in _DOCTOR_STOP_WORDS:
+                break
+            doc_end = doc_start + part_m.end()
+            kept_tokens += 1
+        if kept_tokens > 0:
+            spans.append((m.start(), doc_end))
+    return spans
+
+
+def find_name_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return R7 (start, end, kind) name spans mapped back to input offsets. O(len(text))."""
+    if not text:
+        return []
+    if unicodedata.is_normalized("NFC", text):
+        return _collect_name_spans(text)
+    nfc_text, orig_starts, orig_ends = nfc_with_offset_map(text)
+    spans = _collect_name_spans(nfc_text)
+    return [(orig_starts[s], orig_ends[e - 1], kind) for s, e, kind in spans]
+
+
+def extract_name_candidates(text: str) -> list[tuple[str, str]]:
+    """Extract (surface, kind) name candidates detected by R7 rules without mutating text. O(len(text))."""
+    return [(text[s:e], kind) for s, e, kind in find_name_spans(text)]
+
+
 def redact_names(text: str) -> tuple[str, int]:
     """Redact patient and relative names in free text while preserving R8 medical context.
 
@@ -403,17 +464,9 @@ def redact_names(text: str) -> tuple[str, int]:
     if not text:
         return text, 0
 
-    if unicodedata.is_normalized("NFC", text):
-        spans = _collect_name_spans(text)
-        if not spans:
-            return text, 0
-        mapped_spans = spans
-    else:
-        nfc_text, orig_starts, orig_ends = _nfc_with_offset_map(text)
-        spans = _collect_name_spans(nfc_text)
-        if not spans:
-            return text, 0
-        mapped_spans = [(orig_starts[s], orig_ends[e - 1], kind) for s, e, kind in spans]
+    mapped_spans = find_name_spans(text)
+    if not mapped_spans:
+        return text, 0
 
     parts: list[str] = []
     cursor = 0

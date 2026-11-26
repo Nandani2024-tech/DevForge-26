@@ -6,6 +6,7 @@ import unicodedata
 from collections import Counter
 from typing import Any
 
+from wards.config import METADATA_PATH_KEY_TOKENS, NON_NAME_WORDS
 from wards.patterns import classify_value_shape
 
 # Generic meaning vocabulary per semantic category (never dev-specific column sets)
@@ -140,6 +141,10 @@ _ID_SUFFIXES = frozenset({"id", "ref", "no", "num", "number", "code", "सं", 
 _DATE_TOKENS = frozenset({"date", "dt", "tithi", "तारीख"})
 
 _FHIR_CODE_CONTAINERS = frozenset({"coding", "code", "type", "clinicalstatus", "verificationstatus", "qualification", "relationship"})
+_MAP_ID_TOKENS = frozenset({"uhid", "mrn", "id", "ref", "phone", "mobile", "aadhaar", "aadhar", "abha", "pan"})
+CHANNEL_ID_PREFIXES = _DIRECT_ID_TOKENS | _PATIENT_ID_PREFIXES
+_META_CONTAINER_EXTRA_TOKENS = frozenset({"meta", "exported"})
+_META_LEAF_KEY_TOKENS = frozenset({"by", "path", "file", "source", "user"})
 
 
 def tokenize_header(name: str) -> list[str]:
@@ -359,3 +364,37 @@ def classify_json_key(
 
     semantic = classify_header_tokens(key)
     return semantic if semantic is not None else "FREE_TEXT"
+
+
+def json_dict_key_context(parent_key: str | None) -> str | None:
+    """Infer whether sibling keys of a dict hold person names or IDs based on parent key tokens.
+
+    For example, 'by_name' -> 'PATIENT_NAME', 'by_uhid' -> 'MRN'. Returns None otherwise.
+    Complexity: O(len(parent_key)).
+    """
+    if not parent_key:
+        return None
+    tokens = set(tokenize_header(parent_key))
+    if "by" not in tokens and not parent_key.casefold().endswith("_map"):
+        return None
+    if tokens & _RELATIVE_TOKENS:
+        return "RELATIVE"
+    if tokens & (_NAME_TOKENS | _PERSON_NAME_MODIFIERS):
+        return "PATIENT_NAME"
+    if tokens & _PHONE_TOKENS:
+        return "PHONE"
+    if tokens & _MAP_ID_TOKENS:
+        return "MRN"
+    return None
+
+
+def is_metadata_key(parent_key: str | None, key: str) -> bool:
+    """Return True if key or parent container denotes export/source path metadata. O(len(key))."""
+    key_toks = set(tokenize_header(key))
+    if key_toks & METADATA_PATH_KEY_TOKENS:
+        return True
+    if parent_key:
+        p_toks = set(tokenize_header(parent_key))
+        if (p_toks & (METADATA_PATH_KEY_TOKENS | _META_CONTAINER_EXTRA_TOKENS)) and (key_toks & _META_LEAF_KEY_TOKENS):
+            return True
+    return False

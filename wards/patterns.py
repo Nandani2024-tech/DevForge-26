@@ -43,13 +43,13 @@ _DATE_LIKE_RE = re.compile(r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$")
 _LB = r"(?<![A-Za-z0-9])(?<![A-Za-z0-9][./-])"
 _RB = r"(?![A-Za-z0-9])(?![./-][A-Za-z0-9])"
 
-# Precompiled R6 patterns (horizontal whitespace only so line counts stay unchanged)
-_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+# Precompiled R6 patterns (horizontal whitespace only so line counts stay unchanged; bounded local-part avoids O(n^2) backtracking)
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,128}\.[A-Za-z]{2,16}\b")
 _ABHA_ADDR_LABEL_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_])(?:ABHA|ABDM)[ \t]*(?:Address|Addr|ID)?[ \t]*:[ \t]*"
-    r"(?P<val>[A-Za-z0-9._-]{2,}@[A-Za-z0-9_-]{2,})\b"
+    r"(?P<val>[A-Za-z0-9._-]{2,64}@[A-Za-z0-9_-]{2,64})\b"
 )
-_ABHA_ADDR_BARE_RE = re.compile(r"\b[A-Za-z0-9._-]{3,}@(?:abdm|ndhm|sbx)\b", re.IGNORECASE)
+_ABHA_ADDR_BARE_RE = re.compile(r"\b[A-Za-z0-9._-]{3,64}@(?:abdm|ndhm|sbx)\b", re.IGNORECASE)
 _ABHA_NUM_RE = re.compile(
     rf"{_LB}(?:\d{{2}}[ \t-]\d{{4}}[ \t-]\d{{4}}[ \t-]\d{{4}}|\d{{14}}){_RB}"
 )
@@ -80,6 +80,9 @@ _MRN_SHAPE_RE = re.compile(
     rf"{_LB}(?:[A-Z]{{2,8}}[-/]){{1,3}}\d{{2,12}}(?:[-/]\d{{2,10}})?{_RB}|"
     rf"{_LB}[A-Z]{{2,8}}[-/]?\d{{4,12}}(?:[-/]\d{{2,10}})?{_RB}"
 )
+_MRN_SHAPE_CI_RE = re.compile(_MRN_SHAPE_RE.pattern, re.IGNORECASE)
+_YEAR_SUFFIX_RE = re.compile(r"^([A-Za-z]+)[-/]((?:19|20)\d{2})$")
+_DIGIT_RUN_RE = re.compile(r"(?<![A-Za-z0-9])\d{5,12}(?![A-Za-z0-9])")
 _DOB_LABEL_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_\u0900-\u097f])"
     r"(?:DOB|Date[ \t]+of[ \t]+Birth|Birth[ \t]+Date|जन्म[ \t]*(?:तिथि|दिनांक))"
@@ -163,7 +166,12 @@ def _trim_sentence_punct(text: str, start: int, end: int) -> tuple[int, str]:
     return end, text[start:end]
 
 
-def _collect_spans(ascii_text: str) -> list[tuple[int, int, str]]:
+def _collect_spans(
+    ascii_text: str,
+    *,
+    allow_lowercase_mrn: bool = False,
+    mrn_cores: frozenset[str] = frozenset(),
+) -> list[tuple[int, int, str]]:
     """Collect non-overlapping R6 PII spans in priority order using an O(bytes) occupancy mask.
 
     Complexity: O(len(ascii_text)).
@@ -176,13 +184,14 @@ def _collect_spans(ascii_text: str) -> list[tuple[int, int, str]]:
             occupied[s:e] = b"\x01" * (e - s)
             spans.append((s, e, kind))
 
-    for m in _EMAIL_RE.finditer(ascii_text):
-        _add(m.start(), m.end(), "EMAIL")
+    if "@" in ascii_text:
+        for m in _EMAIL_RE.finditer(ascii_text):
+            _add(m.start(), m.end(), "EMAIL")
 
-    for m in _ABHA_ADDR_LABEL_RE.finditer(ascii_text):
-        _add(m.start("val"), m.end("val"), "ABHA_ADDRESS")
-    for m in _ABHA_ADDR_BARE_RE.finditer(ascii_text):
-        _add(m.start(), m.end(), "ABHA_ADDRESS")
+        for m in _ABHA_ADDR_LABEL_RE.finditer(ascii_text):
+            _add(m.start("val"), m.end("val"), "ABHA_ADDRESS")
+        for m in _ABHA_ADDR_BARE_RE.finditer(ascii_text):
+            _add(m.start(), m.end(), "ABHA_ADDRESS")
 
     for m in _ABHA_NUM_RE.finditer(ascii_text):
         _add(m.start(), m.end(), "ABHA")
@@ -219,9 +228,28 @@ def _collect_spans(ascii_text: str) -> list[tuple[int, int, str]]:
             if any(ch.isdigit() for ch in val):
                 _add(m.start("val"), end, "MRN")
 
-    for m in _MRN_SHAPE_RE.finditer(ascii_text):
-        if _is_valid_mrn_token(m.group(0)):
+    mrn_rx = _MRN_SHAPE_CI_RE if allow_lowercase_mrn else _MRN_SHAPE_RE
+    id_prefixes: frozenset[str] = frozenset()
+    if allow_lowercase_mrn:
+        from wards.columns import CHANNEL_ID_PREFIXES
+
+        id_prefixes = CHANNEL_ID_PREFIXES
+    for m in mrn_rx.finditer(ascii_text):
+        tok = m.group(0)
+        if allow_lowercase_mrn:
+            ym = _YEAR_SUFFIX_RE.match(tok)
+            if ym is not None:
+                prefix = ym.group(1).casefold()
+                year_digits = ym.group(2)
+                if prefix not in id_prefixes and year_digits not in mrn_cores:
+                    continue
+        if _is_valid_mrn_token(tok):
             _add(m.start(), m.end(), "MRN")
+
+    if mrn_cores:
+        for m in _DIGIT_RUN_RE.finditer(ascii_text):
+            if m.group(0) in mrn_cores:
+                _add(m.start(), m.end(), "MRN")
 
     for m in _DOB_LABEL_RE.finditer(ascii_text):
         end, val = _trim_sentence_punct(ascii_text, m.start("val"), m.end("val"))
@@ -250,6 +278,29 @@ def _collect_spans(ascii_text: str) -> list[tuple[int, int, str]]:
 
     spans.sort(key=lambda item: item[0])
     return spans
+
+
+def find_identifier_spans(
+    text: str,
+    *,
+    allow_lowercase_mrn: bool = False,
+    mrn_cores: frozenset[str] = frozenset(),
+) -> list[tuple[int, int, str]]:
+    """Return sorted non-overlapping R6 spans for text without mutating it. O(len(text))."""
+    if not text:
+        return []
+    return _collect_spans(
+        normalise_digits(text),
+        allow_lowercase_mrn=allow_lowercase_mrn,
+        mrn_cores=mrn_cores,
+    )
+
+
+def extract_mrn_tokens(text: str) -> list[str]:
+    """Extract MRN strings detected by R6 patterns in text. O(len(text))."""
+    if not text:
+        return []
+    return [text[s:e] for s, e, kind in find_identifier_spans(text) if kind == "MRN"]
 
 
 def redact_identifiers(text: str) -> tuple[str, int]:

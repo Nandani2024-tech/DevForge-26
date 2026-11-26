@@ -32,6 +32,101 @@ PLACEHOLDERS: dict[str, str] = {
     "ADDRESS": "[ADDRESS]",
 }
 
+# Filename-safe placeholders (no / \ : * ? " < > | or brackets)
+FILENAME_PLACEHOLDERS: dict[str, str] = {kind: token.strip("[]") for kind, token in PLACEHOLDERS.items()}
+
+# Named windows and shared R7/R8 linguistic constants (MISTAKES #32)
+KCO_HO_WINDOW_CHARS = 80
+PRE_REL_LOOKBACK_CHARS = 80
+DEVA_TIME_UNITS = ("दिन", "सप्ताह", "माह", "महीने", "वर्ष")
+DEVA_SYMPTOM_WORDS = (
+    "बुखार",
+    "दर्द",
+    "खांसी",
+    "जुकाम",
+    "कमजोरी",
+    "चक्कर",
+    "उल्टी",
+    "दस्त",
+    "सूजन",
+    "सांस",
+)
+HINGLISH_SUBJECT_MARKERS = (
+    "BP",
+    "pulse",
+    "temp",
+    "spo2",
+    "RBS",
+    "Hb",
+    "condition",
+    "tabiyat",
+    "halat",
+    "bukhar",
+    "dard",
+    "report",
+    "weight",
+)
+DOCUMENT_SUBJECT_NOUNS = ("summary", "record", "report", "note", "visit", "case")
+ATTENDANT_ACTION_VERBS = (
+    "accompanied",
+    "brought",
+    "witnessed",
+    "attended",
+    "signed",
+    "called",
+    "contacted",
+    "informed",
+    "reported",
+)
+REFERRAL_CLINICAL_VERBS = ("accompanied", "brought", "witnessed", "attended", "referred", "reviewed")
+
+# R9 hidden-channel cleaning constants (generic formats/function words only; D6 ratchet-compliant)
+MIN_CHANNEL_NAME_TOKEN_LEN = 3
+MIN_CHANNEL_MRN_DIGITS = 5
+CHANNEL_SAFE_WORDS = frozenset(
+    {
+        "com",
+        "csv",
+        "fhir",
+        "jpg",
+        "json",
+        "patient",
+        "patients",
+        "pdf",
+        "root",
+        "tsv",
+        "txt",
+        "version",
+        "xml",
+        "by",
+        "of",
+        "for",
+        "and",
+        "the",
+        "name",
+        "names",
+    }
+)
+METADATA_PATH_KEY_TOKENS = frozenset(
+    {
+        "source",
+        "path",
+        "file",
+        "filename",
+        "filepath",
+        "uri",
+        "url",
+        "href",
+        "src",
+        "export",
+        "exported",
+        "dir",
+        "folder",
+        "location",
+        "origin",
+    }
+)
+
 # Generic R7/R8 linguistic constants (never harvested from dev inputs)
 NAME_LABELS = (
     "Patient Name",
@@ -365,7 +460,6 @@ CLINICAL_HEAD_NOUNS = frozenset(
         "cholera",
         "malaria",
         "typhoid",
-        "dengue",
         "diabetes",
         "hypertension",
         "asthma",

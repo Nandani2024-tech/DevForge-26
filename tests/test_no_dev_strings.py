@@ -7,8 +7,7 @@ from pathlib import Path
 
 def test_no_dev_truth_surfaces_in_repo(repo_root: Path, kit_dir: Path) -> None:
     truth_path = kit_dir / "dev" / "truth" / "truth.json"
-    if not truth_path.is_file():
-        return
+    assert truth_path.is_file(), f"Missing truth fixture: {truth_path}"
 
     truth = json.loads(truth_path.read_text(encoding="utf-8"))
     surfaces = sorted(

@@ -17,5 +17,6 @@ def repo_root() -> Path:
 @pytest.fixture(scope="session")
 def kit_dir() -> Path:
     if not KIT_DIR.is_dir():
-        pytest.skip("Secret-Wards-ToolKit directory not found alongside repo")
+        # Guard and kit tests must fail, never skip, when their fixture is missing (00-rules sec 4)
+        pytest.fail("Secret-Wards-ToolKit directory not found alongside repo")
     return KIT_DIR

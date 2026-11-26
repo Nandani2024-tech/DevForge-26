@@ -1,0 +1,223 @@
+# R22 vocabulary allowlist (reviewed; seeded 2026-11-26 in review, not by the coding agent).
+# Each line: word | file | owner (top-level constant or function, or YAML key) | non-dev source.
+# tests/test_r22_vocab_overlap.py fails on any code/config word that is a dev file-name token or
+# occurs in 1-3 dev input files and has no line here. Only Claude or the user edits this file, in review.
+# Left out on purpose: CHANNEL_SAFE_WORDS entries tuned to dev file names, NON_MRN_CHANNEL_PREFIXES, dengue.
+aadhar | wards/columns.py | _AADHAAR_TOKENS | UIDAI Aadhaar ID label, common Latin spelling variant
+aadhar | wards/columns.py | _MAP_ID_TOKENS | UIDAI Aadhaar ID label, common Latin spelling variant
+aadhar | wards/config.py | NAME_LABEL_STOP_WORDS | UIDAI Aadhaar ID label, common Latin spelling variant
+aadhar | wards/slots.py | _SECONDARY_ID_TOKENS | UIDAI Aadhaar ID label, common Latin spelling variant
+adm | wards/columns.py | _PATIENT_ID_PREFIXES | admission-number abbreviation (HL7 v2 ADT)
+adm | wards/slots.py | _RECORD_PREFIX_TOKENS | admission-number abbreviation (HL7 v2 ADT)
+bhaiya | wards/config.py | SUFFIX_HONORIFICS | Hindi kinship honorific (language)
+bundle | wards/ingest.py | read_and_parse | FHIR R4 resourceType Bundle
+bundle | wards/slots.py | is_document_json | FHIR R4 resourceType Bundle
+callback | wards/columns.py | _PHONE_TOKENS | English contact word (phone meaning)
+called | wards/config.py | ATTENDANT_ACTION_VERBS | English verb (attendant action)
+category | wards/columns.py | _PRESERVE_EXACT_TOKENS | English schema word
+category | wards/slots.py | _NON_PATIENT_TOKENS | English schema word
+cell | wards/columns.py | _PHONE_TOKENS | English phone word (cell number)
+city | wards/columns.py | _VILLAGE_TOKENS | address schema field (FHIR Address.city)
+city | wards/columns.py | classify_json_key | address schema field (FHIR Address.city)
+colony | wards/columns.py | _LOCALITY_TOKENS | Indian address locality word
+com | wards/channels.py | _RESERVED_WIN_STEMS | URL top-level domain / Windows reserved device name
+com | wards/config.py | CHANNEL_SAFE_WORDS | URL top-level domain / Windows reserved device name
+continue | wards/config.py | NON_NAME_WORDS | English function word
+csv | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
+csv | wards/config.py | SUPPORTED_EXTENSIONS | file format extension
+csv | wards/ingest.py | read_and_parse | file format extension
+csv | wards/pipeline.py | _harvest_parsed_evidence | file format extension
+csv | wards/pipeline.py | run_pipeline | file format extension
+deep | wards/ingest.py | read_and_parse | English word (deep-JSON quarantine reason)
+discharged | wards/config.py | NON_NAME_WORDS | English clinical verb
+drug | wards/columns.py | _PRESERVE_EXACT_TOKENS | clinical vocabulary (medication)
+drug | wards/slots.py | _NON_PATIENT_TOKENS | clinical vocabulary (medication)
+email | wards/columns.py | _EMAIL_TOKENS | contact schema field
+email | wards/columns.py | classify_header_tokens | contact schema field
+email | wards/config.py | NAME_LABEL_STOP_WORDS | contact schema field
+email | wards/config.py | PLACEHOLDERS | contact schema field
+email | wards/patterns.py | _collect_spans | contact schema field
+email | wards/patterns.py | classify_value_shape | contact schema field
+email | wards/slots.py | _SECONDARY_ID_TOKENS | contact schema field
+empty | wards/ingest.py | read_and_parse | English word (reason code)
+export | wards/columns.py | is_metadata_key | English schema word (export metadata)
+export | wards/config.py | METADATA_PATH_KEY_TOKENS | English schema word (export metadata)
+facility | wards/columns.py | _CLINICAL_CONTAINERS | FHIR/HL7 Location/facility term
+facility | wards/columns.py | _PRESERVE_EXACT_TOKENS | FHIR/HL7 Location/facility term
+facility | wards/slots.py | _NON_PATIENT_TOKENS | FHIR/HL7 Location/facility term
+fhir | wards/config.py | CHANNEL_SAFE_WORDS | HL7 FHIR standard name
+fhir | wards/ingest.py | read_and_parse | HL7 FHIR standard name
+fhir | wards/pipeline.py | _harvest_parsed_evidence | HL7 FHIR standard name
+fhir | wards/pipeline.py | _process_json | HL7 FHIR standard name
+fhir | wards/pipeline.py | run_pipeline | HL7 FHIR standard name
+first | wards/columns.py | _PERSON_NAME_MODIFIERS | name schema field (first name)
+form | wards/columns.py | _PRESERVE_EXACT_TOKENS | English schema word
+form | wards/slots.py | _NON_PATIENT_TOKENS | English schema word
+gram | wards/columns.py | _VILLAGE_TOKENS | Hindi address word (gram = village)
+gram | wards/config.py | NAME_LABEL_STOP_WORDS | Hindi address word (gram = village)
+gram | wards/patterns.py | _VILLAGE_LABEL_RE | Hindi address word (gram = village)
+guardian | wards/columns.py | _RELATIVE_TOKENS | relation label (English)
+guardian | wards/config.py | NAME_LABEL_STOP_WORDS | relation label (English)
+guardian | wards/config.py | RELATIVE_LABELS | relation label (English)
+ipd | wards/columns.py | _PATIENT_ID_PREFIXES | Indian HIS in-patient department abbreviation
+ipd | wards/config.py | NAME_LABEL_STOP_WORDS | Indian HIS in-patient department abbreviation
+ipd | wards/config.py | NON_NAME_WORDS | Indian HIS in-patient department abbreviation
+ipd | wards/patterns.py | _MRN_LABEL_RE | Indian HIS in-patient department abbreviation
+ipd | wards/slots.py | _RECORD_PREFIX_TOKENS | Indian HIS in-patient department abbreviation
+ipd | wards/slots.py | _TEXT_LABEL_RE | Indian HIS in-patient department abbreviation
+jpg | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
+json | wards/cli.py | main | file format
+json | wards/config.py | CHANNEL_SAFE_WORDS | file format
+json | wards/config.py | SUPPORTED_EXTENSIONS | file format
+json | wards/ingest.py | read_and_parse | file format
+json | wards/pipeline.py | _harvest_parsed_evidence | file format
+json | wards/pipeline.py | run_pipeline | file format
+lab | wards/columns.py | _CLINICAL_CONTAINERS | clinical department (laboratory)
+lab | wards/columns.py | _PRESERVE_EXACT_TOKENS | clinical department (laboratory)
+laboratory | wards/config.py | NON_NAME_WORDS | clinical department
+last | wards/columns.py | _PERSON_NAME_MODIFIERS | name schema field (last name)
+level | config/policy.yaml | location_level | English schema word (policy location_level)
+level | wards/config.py | REQUIRED_POLICY_KEYS | English schema word (policy location_level)
+level | wards/config.py | load_policy | English schema word (policy location_level)
+local | wards/columns.py | _PERSON_NAME_MODIFIERS | English address word (locality)
+note | wards/columns.py | _FREE_TEXT_TOKENS | clinical document type
+note | wards/config.py | DOCUMENT_SUBJECT_NOUNS | clinical document type
+notes | wards/columns.py | _FREE_TEXT_TOKENS | clinical document type
+opd | wards/columns.py | _PATIENT_ID_PREFIXES | Indian HIS out-patient department abbreviation
+opd | wards/config.py | NAME_LABEL_STOP_WORDS | Indian HIS out-patient department abbreviation
+opd | wards/config.py | NON_NAME_WORDS | Indian HIS out-patient department abbreviation
+opd | wards/patterns.py | _MRN_LABEL_RE | Indian HIS out-patient department abbreviation
+opd | wards/slots.py | _RECORD_PREFIX_TOKENS | Indian HIS out-patient department abbreviation
+opd | wards/slots.py | _TEXT_LABEL_RE | Indian HIS out-patient department abbreviation
+opp | wards/columns.py | _LANDMARK_TOKENS | Indian address landmark abbreviation (opposite)
+papa | wards/config.py | SUFFIX_HONORIFICS | Hindi kinship term
+patient | wards/channels.py | ChannelEvidence | clinical schema word
+patient | wards/channels.py | _merge_adjacent_name_spans | clinical schema word
+patient | wards/channels.py | clean_channel_text | clinical schema word
+patient | wards/columns.py | _PATIENT_ID_PREFIXES | clinical schema word
+patient | wards/columns.py | _PERSON_NAME_MODIFIERS | clinical schema word
+patient | wards/columns.py | classify_header_tokens | clinical schema word
+patient | wards/columns.py | classify_json_key | clinical schema word
+patient | wards/columns.py | json_dict_key_context | clinical schema word
+patient | wards/config.py | CHANNEL_SAFE_WORDS | clinical schema word
+patient | wards/config.py | NAME_LABELS | clinical schema word
+patient | wards/config.py | NON_NAME_WORDS | clinical schema word
+patient | wards/config.py | PLACEHOLDERS | clinical schema word
+patient | wards/names.py | _DIRECT_NAME_RULES | clinical schema word
+patient | wards/names.py | _collect_name_spans | clinical schema word
+patient | wards/patterns.py | _MRN_LABEL_RE | clinical schema word
+patient | wards/pipeline.py | _harvest_json_evidence | clinical schema word
+patient | wards/pipeline.py | _harvest_parsed_evidence | clinical schema word
+patient | wards/pipeline.py | _process_csv | clinical schema word
+patient | wards/pipeline.py | _process_json | clinical schema word
+patient | wards/pipeline.py | _process_text | clinical schema word
+patient | wards/pipeline.py | run_pipeline | clinical schema word
+patient | wards/slots.py | _PATIENT_NOUN_TOKENS | clinical schema word
+patient | wards/slots.py | _TEXT_LABEL_RE | clinical schema word
+patient | wards/slots.py | replace_fhir_slot | clinical schema word
+patients | wards/config.py | CHANNEL_SAFE_WORDS | clinical schema word
+pdf | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
+pin | config/policy.yaml | pin_prefix_digits | Indian postal code (PIN) field
+pin | wards/columns.py | _PIN_TOKENS | Indian postal code (PIN) field
+pin | wards/columns.py | classify_header_tokens | Indian postal code (PIN) field
+pin | wards/columns.py | classify_json_key | Indian postal code (PIN) field
+pin | wards/config.py | NAME_LABEL_STOP_WORDS | Indian postal code (PIN) field
+pin | wards/config.py | PLACEHOLDERS | Indian postal code (PIN) field
+pin | wards/config.py | REQUIRED_POLICY_KEYS | Indian postal code (PIN) field
+pin | wards/config.py | _INT_POLICY_KEYS | Indian postal code (PIN) field
+pin | wards/config.py | load_policy | Indian postal code (PIN) field
+pin | wards/patterns.py | _collect_spans | Indian postal code (PIN) field
+pin | wards/patterns.py | classify_value_shape | Indian postal code (PIN) field
+reference | wards/pipeline.py | _FHIR_PRESERVE_LEAF_KEYS | FHIR Reference element / RFC 6901 reference
+reference | wards/pipeline.py | _clean_json_values | FHIR Reference element / RFC 6901 reference
+reference | wards/pipeline.py | _harvest_json_evidence | FHIR Reference element / RFC 6901 reference
+registered | wards/columns.py | _PRESERVE_EXACT_TOKENS | English schema word
+registration | wards/columns.py | _PATIENT_ID_PREFIXES | HIS registration (ADT) term
+registration | wards/config.py | NAME_LABEL_STOP_WORDS | HIS registration (ADT) term
+registration | wards/slots.py | _RECORD_PREFIX_TOKENS | HIS registration (ADT) term
+registration | wards/slots.py | find_text_slot_span | HIS registration (ADT) term
+relation | wards/columns.py | _PRESERVE_EXACT_TOKENS | relation schema field
+relative | wards/channels.py | _merge_adjacent_name_spans | relation schema word
+relative | wards/columns.py | _RELATIVE_TOKENS | relation schema word
+relative | wards/columns.py | classify_header_tokens | relation schema word
+relative | wards/columns.py | classify_json_key | relation schema word
+relative | wards/columns.py | json_dict_key_context | relation schema word
+relative | wards/config.py | NAME_LABEL_STOP_WORDS | relation schema word
+relative | wards/config.py | NON_NAME_WORDS | relation schema word
+relative | wards/config.py | PLACEHOLDERS | relation schema word
+relative | wards/config.py | RELATIVE_LABELS | relation schema word
+relative | wards/names.py | _DIRECT_NAME_RULES | relation schema word
+relative | wards/names.py | _POSSESSIVE_ATTENDANT_RE | relation schema word
+relative | wards/names.py | _collect_name_spans | relation schema word
+relative | wards/pipeline.py | _harvest_json_evidence | relation schema word
+relative | wards/pipeline.py | _harvest_parsed_evidence | relation schema word
+report | wards/cli.py | main | clinical document type / report.json
+report | wards/config.py | DOCUMENT_SUBJECT_NOUNS | clinical document type / report.json
+report | wards/config.py | HINGLISH_SUBJECT_MARKERS | clinical document type / report.json
+report | wards/config.py | REPORT_SCHEMA | clinical document type / report.json
+report | wards/pipeline.py | run_pipeline | clinical document type / report.json
+results | wards/columns.py | _PRESERVE_EXACT_TOKENS | lab schema word (Observation results)
+root | wards/config.py | CHANNEL_SAFE_WORDS | OS path word
+saans | wards/config.py | COMPLAINT_WORDS | Hindi/Hinglish complaint word (breath)
+schedule | wards/columns.py | _PRESERVE_EXACT_TOKENS | English schema word
+schedule | wards/slots.py | _NON_PATIENT_TOKENS | English schema word
+schema | wards/columns.py | _PRESERVE_EXACT_TOKENS | report schema field
+schema | wards/pipeline.py | run_pipeline | report schema field
+schema | wards/slots.py | _NON_PATIENT_TOKENS | report schema field
+street | wards/columns.py | _LOCALITY_TOKENS | address schema field (FHIR Address.line)
+summary | wards/config.py | DOCUMENT_SUBJECT_NOUNS | clinical document type (discharge summary)
+tsv | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
+tsv | wards/config.py | SUPPORTED_EXTENSIONS | file format extension
+tsv | wards/ingest.py | read_and_parse | file format extension
+txt | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
+txt | wards/config.py | SUPPORTED_EXTENSIONS | file format extension
+uhid | wards/columns.py | _DIRECT_ID_TOKENS | Indian HIS unique health ID label
+uhid | wards/columns.py | _MAP_ID_TOKENS | Indian HIS unique health ID label
+uhid | wards/config.py | NAME_LABEL_STOP_WORDS | Indian HIS unique health ID label
+uhid | wards/patterns.py | _MRN_LABEL_RE | Indian HIS unique health ID label
+uhid | wards/slots.py | _DIRECT_PATIENT_ID_TOKENS | Indian HIS unique health ID label
+uhid | wards/slots.py | _TEXT_LABEL_RE | Indian HIS unique health ID label
+units | wards/names.py | _FAST_PROTECT_RE | measurement schema word
+utf | wards/config.py | load_policy | encoding name (UTF-8/16)
+utf | wards/config.py | require_secret | encoding name (UTF-8/16)
+utf | wards/ingest.py | decode_bytes | encoding name (UTF-8/16)
+utf | wards/pseudo.py | date_shift_days | encoding name (UTF-8/16)
+utf | wards/pseudo.py | pseudonym | encoding name (UTF-8/16)
+utf | wards/writers.py | write_records_jsonl | encoding name (UTF-8/16)
+utf | wards/writers.py | write_report_json | encoding name (UTF-8/16)
+utf | wards/writers.py | write_sanitized_text | encoding name (UTF-8/16)
+version | wards/__init__.py | __all__ | schema/package version
+version | wards/config.py | CHANNEL_SAFE_WORDS | schema/package version
+vitals | wards/columns.py | _CLINICAL_CONTAINERS | clinical vocabulary (vital signs)
+vitals | wards/columns.py | _PRESERVE_EXACT_TOKENS | clinical vocabulary (vital signs)
+vitals | wards/config.py | NON_NAME_WORDS | clinical vocabulary (vital signs)
+ward | wards/columns.py | _CLINICAL_CONTAINERS | hospital unit (R8 preserve)
+ward | wards/columns.py | _PRESERVE_EXACT_TOKENS | hospital unit (R8 preserve)
+ward | wards/config.py | NAME_LABEL_STOP_WORDS | hospital unit (R8 preserve)
+ward | wards/config.py | NON_NAME_WORDS | hospital unit (R8 preserve)
+ward | wards/names.py | _FAST_PROTECT_RE | hospital unit (R8 preserve)
+ward | wards/slots.py | _NON_PATIENT_TOKENS | hospital unit (R8 preserve)
+wards | wards/cli.py | build_parser | package name
+whatsapp | wards/columns.py | _PHONE_TOKENS | Indian phone-column meaning token (WhatsApp number)
+xml | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
+zip | wards/columns.py | _PIN_TOKENS | postal code schema word (ZIP code)
+उल्टी | wards/config.py | COMPLAINT_WORDS | Hindi symptom word (vomiting)
+उल्टी | wards/config.py | DEVA_SYMPTOM_WORDS | Hindi symptom word (vomiting)
+खांसी | wards/config.py | COMPLAINT_WORDS | Hindi symptom word (cough)
+खांसी | wards/config.py | DEVA_SYMPTOM_WORDS | Hindi symptom word (cough)
+चक्कर | wards/config.py | COMPLAINT_WORDS | Hindi symptom word (dizziness)
+चक्कर | wards/config.py | DEVA_SYMPTOM_WORDS | Hindi symptom word (dizziness)
+दस्त | wards/config.py | COMPLAINT_WORDS | Hindi symptom word (diarrhoea)
+दस्त | wards/config.py | DEVA_SYMPTOM_WORDS | Hindi symptom word (diarrhoea)
+पति | wards/columns.py | _RELATIVE_TOKENS | Hindi relation label (husband)
+पति | wards/config.py | NAME_LABEL_STOP_WORDS | Hindi relation label (husband)
+पति | wards/config.py | RELATIVE_LABELS | Hindi relation label (husband)
+पति | wards/names.py | _DEVA_REL_MARKER_RE | Hindi relation label (husband)
+पति | wards/names.py | _STOP_TRIGGER_RE | Hindi relation label (husband)
+माता | wards/columns.py | _RELATIVE_TOKENS | Hindi relation label (mother)
+माता | wards/config.py | NAME_LABEL_STOP_WORDS | Hindi relation label (mother)
+माता | wards/config.py | RELATIVE_LABELS | Hindi relation label (mother)
+में | wards/config.py | NON_NAME_WORDS | Hindi postposition (in)
+मोहल्ला | wards/columns.py | _LOCALITY_TOKENS | Hindi address word (locality)
+मोहल्ला | wards/config.py | NAME_LABEL_STOP_WORDS | Hindi address word (locality)
+मोहल्ला | wards/patterns.py | _VILLAGE_LABEL_RE | Hindi address word (locality)

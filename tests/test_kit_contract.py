@@ -11,15 +11,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from wards.config import FILENAME_PLACEHOLDERS, PLACEHOLDERS
 from wards.ingest import decode_bytes, is_json_content, json_pointer_unescape
 
 
 def _compare_json_shape(inp_val: Any, san_val: Any, path: str = "$") -> None:
     assert type(inp_val) is type(san_val), f"type mismatch at {path}: {type(inp_val)} vs {type(san_val)}"
     if isinstance(inp_val, dict):
-        assert list(inp_val.keys()) == list(san_val.keys()), f"key mismatch at {path}"
-        for k in inp_val:
-            _compare_json_shape(inp_val[k], san_val[k], f"{path}.{k}")
+        assert len(inp_val) == len(san_val), f"key count mismatch at {path}"
+        for k_in, k_san in zip(inp_val.keys(), san_val.keys()):
+            if k_in != k_san:
+                assert any(ph in k_san for ph in PLACEHOLDERS.values()), f"unexpected non-PII key rename at {path}: {k_in} -> {k_san}"
+            _compare_json_shape(inp_val[k_in], san_val[k_san], f"{path}.{k_san}")
     elif isinstance(inp_val, list):
         assert len(inp_val) == len(san_val), f"list length mismatch at {path}"
         for idx, (a, b) in enumerate(zip(inp_val, san_val)):
@@ -121,17 +124,38 @@ def test_kit_contract_shape_and_spike(tmp_path: Path, repo_root: Path, kit_dir: 
     assert sub_proc.returncode == 0, sub_proc.stdout + sub_proc.stderr
     assert "READY TO SUBMIT" in sub_proc.stdout
 
-    # 4. Shape diff: every sanitized file vs input has 0 structural/line/type differences
+    # 4. Shape diff: every sanitized file vs input has 0 structural/line/type differences (R3),
+    # allowing only PII renames on filenames, headers, and keys (R9)
+    import hashlib
+
     report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
     counts = report["counts"]
     assert counts["files_total"] == len(report["files"])
     assert counts["files_sanitized"] + counts["files_quarantined"] == counts["files_total"]
 
+    inp_by_sha: dict[str, list[str]] = {}
+    for p in sorted((p for p in dev_input.rglob("*") if p.is_file()), key=lambda p: p.relative_to(dev_input).as_posix()):
+        sha = hashlib.sha256(p.read_bytes()).hexdigest()
+        inp_by_sha.setdefault(sha, []).append(p.relative_to(dev_input).as_posix())
+    sha_cursor: dict[str, int] = {}
+
     sanitized_dir = out_dir / "sanitized"
-    for rel_path in sorted(p.relative_to(sanitized_dir).as_posix() for p in sanitized_dir.rglob("*") if p.is_file()):
-        inp_file = dev_input / rel_path
-        san_file = sanitized_dir / rel_path
-        assert inp_file.is_file()
+    for entry in report["files"]:
+        if entry["status"] != "sanitized":
+            continue
+        sha = entry["input_sha256"]
+        idx = sha_cursor.get(sha, 0)
+        sha_cursor[sha] = idx + 1
+        inp_rel = inp_by_sha[sha][idx]
+        out_rel = str(entry["output"]).replace("sanitized/", "", 1)
+
+        inp_file = dev_input / inp_rel
+        san_file = sanitized_dir / out_rel
+        assert san_file.is_file()
+        assert Path(out_rel).suffix == Path(inp_rel).suffix
+        if out_rel != inp_rel:
+            assert not inp_rel.startswith("clean/"), f"clean file renamed: {inp_rel} -> {out_rel}"
+            assert any(ph in out_rel for ph in FILENAME_PLACEHOLDERS.values()), f"non-PII rename: {out_rel}"
 
         inp_text = decode_bytes(inp_file.read_bytes())
         assert inp_text is not None
@@ -139,16 +163,19 @@ def test_kit_contract_shape_and_spike(tmp_path: Path, repo_root: Path, kit_dir: 
 
         ext = inp_file.suffix.lower()
         if ext == ".json" or (ext in (".csv", ".tsv") and is_json_content(inp_text)):
-            _compare_json_shape(json.loads(inp_text), json.loads(san_text), rel_path)
+            _compare_json_shape(json.loads(inp_text), json.loads(san_text), out_rel)
         elif ext in (".csv", ".tsv"):
             delim = "\t" if ext == ".tsv" else ","
             inp_rows = list(csv.reader(io.StringIO(inp_text, newline=""), delimiter=delim))
             san_rows = list(csv.reader(io.StringIO(san_text, newline=""), delimiter=delim))
-            assert len(inp_rows) == len(san_rows), f"row count mismatch in {rel_path}"
-            assert inp_rows[0] == san_rows[0], f"header mismatch in {rel_path}"
-            assert [len(r) for r in inp_rows] == [len(r) for r in san_rows], f"col count mismatch in {rel_path}"
+            assert len(inp_rows) == len(san_rows), f"row count mismatch in {out_rel}"
+            assert len(inp_rows[0]) == len(san_rows[0]), f"header count mismatch in {out_rel}"
+            for h_in, h_san in zip(inp_rows[0], san_rows[0]):
+                if h_in != h_san:
+                    assert any(ph in h_san for ph in PLACEHOLDERS.values()), f"non-PII header rename in {out_rel}"
+            assert [len(r) for r in inp_rows] == [len(r) for r in san_rows], f"col count mismatch in {out_rel}"
         else:
-            assert len(inp_text.splitlines()) == len(san_text.splitlines()), f"line count mismatch in {rel_path}"
+            assert len(inp_text.splitlines()) == len(san_text.splitlines()), f"line count mismatch in {out_rel}"
 
     # 5. Spike check: >= 95% of non-null records.jsonl claims appear inside their exported record
     records = [
