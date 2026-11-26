@@ -14,7 +14,7 @@ Read ONLY: `.hackathon/SCOREBOARD.md` (the last Progress-log row, Open fixes, Op
 - Use the exact commands from `tools/VERIFY.md` (kit at `../Secret-Wards-ToolKit`, `RAKSHA_SECRET=practice`). Write all outputs under `out_score/` (gitignored by `out*/`). Delete `out_score/` before you start.
 - Every number you write comes from a command you ran in this session. Label scores "estimate". Never copy a number from an older entry as if it were new.
 - Never write patient values, dev names or IDs into SCOREBOARD.md. Counts, percentages, file paths of our own tools and commit hashes only.
-- Never edit or delete earlier SCOREBOARD entries or rows. Only append, and only change the `status` cells of Open fixes / Open doubts.
+- Never edit or delete earlier SCOREBOARD entries or rows. Only append, change the `status` cells of Open fixes / Open doubts, and move a DONE fix or RESOLVED doubt to its Resolved table (steps 2 and 6).
 
 ## Preflight (stop with a one-line reason if any fails)
 1. `../Secret-Wards-ToolKit/dev/input` exists with 200 files, and `dev/truth/truth.json` and `dev/attacker/` exist.
@@ -35,7 +35,11 @@ For every regression, log it in `.hackathon/MISTAKES.md` per the MISTAKES rule i
 
 ## Write to .hackathon/SCOREBOARD.md
 1. Append one row to the Progress log table: date, short hash (add `dirty` if needed), label, est. dev, est. mutated, leak dev, leak mutated, canaries, F0.5 / wrong merges, medical kept, penalties, verdict.
-2. Update the `status` of each Open fix: `DONE (<date>, <hash>)` when its metric now shows the fix (for example the base64 channel at 0% for #1), `PARTIAL` when it moved but is not done, otherwise leave it.
+2. Update the `status` of each Open fix: `PARTIAL` when its metric moved but the fix is not done, otherwise leave it. When its metric now shows the fix (for example the base64 channel at 0% for #1), it is done: remove its row from "Open fixes" and append it to the `## Resolved fixes` table (create it right after Open fixes if missing) with columns `# | issue | how it was fixed | commit | evidence | date`:
+   - issue: what was wrong and its cause, in plain words;
+   - how it was fixed: the approach, taken from the matching `.hackathon/DECISIONS.md` entry (name its id, e.g. D11) and the commit subject; if there is no entry, the commit subject only;
+   - commit: the short hash that fixed it; evidence: `before -> after` numbers measured in this run against the row where the fix was opened; date: today.
+   Never use patient values, dev names or IDs in these cells.
 3. Find new issues. Sources, in this order:
    - the "top fixes" / weak-spot output of `estimate_score.py` (dev and mutated);
    - every leak type, hiding place or script that is above 0% in `check_dev.py` and not already covered by an Open fix;
@@ -47,8 +51,8 @@ For every regression, log it in `.hackathon/MISTAKES.md` per the MISTAKES rule i
 5. Append each new issue as the next numbered row:
    - Open fixes: `fix (cause, never values) | category | est. gain | effort | V1 item or "new" | OPEN`. Add issues of any size; mark gains under 1 point as `small`. Then re-rank only the OPEN rows by estimated points per hour (keep the numbers, change the order).
    - Open doubts: something unexplained or unverified that could change the score (for example "dates in format X not shifted?"), with `OPEN` and what would confirm it.
-6. Update the status of each Open doubt you could answer, with the evidence in a few words. A doubt that turns out to be a real problem becomes an Open fix, and the doubt is marked `RESOLVED -> fix #<n>`.
-7. Append a dated section `## <date> · <hash> · <label>` with: the score-estimate table (category | max | estimate | change vs previous), the dev and mutated leak summaries, the regressions (if any), `New issues added: fixes #.., doubts D-..` (or "none"), and what was not measured.
+6. Update the status of each Open doubt you could answer, with the evidence in a few words. A doubt that turns out to be a real problem becomes an Open fix, and the doubt's answer is `real problem -> fix #<n>`. An answered doubt is RESOLVED: remove its row from "Open doubts" and append it to the `## Resolved doubts` table (create it right after Open doubts if missing) with columns `doubt | answer | evidence | date`. No patient values.
+7. Append a dated section `## <date> · <hash> · <label>` with: the score-estimate table (category | max | estimate | change vs previous), the dev and mutated leak summaries, the regressions (if any), one line per fix resolved this run `Fixed: #<n> <issue> -> <how> (<commit>, <before -> after>)` and per doubt resolved `Resolved: D-<x> <doubt> -> <answer>`, `New issues added: fixes #.., doubts D-..` (or "none"), and what was not measured.
 
 Also set `build.score-check: <total dev> / <total mutated> <verdict> @ <hash>` in `.hackathon/STATE.md`.
 
