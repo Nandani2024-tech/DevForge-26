@@ -21,7 +21,7 @@ Checks (severity in brackets):
 - **H. Duplication:** copy-pasted logic that should be one function. [WARN]
 - **I. Reinvented wheel:** more than 30 new lines of generic logic that a library from the Reuse Stack (or a well-known one) already provides. [WARN]
 - **J. Complexity smell:** nested loops over unbounded input, queries inside loops, loading everything into memory. [WARN, BLOCKER if it breaks a stated target]
-- **K. Guard tampering (R22):** any added, removed or changed line in `tests/r22_vocab_allowlist.txt` or the R22 guard tests (`tests/test_no_dev_strings.py`, `tests/test_r22_vocab_overlap.py`), or a weakened threshold, scope or early return in them, made by the coding agent. Only Claude or the user edits these, in review. [BLOCKER unless the change was made in this review session and the user approved it]
+- **K. Guard tampering (R22):** any added, removed or changed line in `tests/r22_vocab_allowlist.txt`, `tests/vocab_lock.json` or the R22 guard tests (`tests/test_no_dev_strings.py`, `tests/test_r22_vocab_overlap.py`, `tests/test_vocab_lock.py`), or a weakened threshold, scope or early return in them, made by the coding agent. Only Claude or the user edits these, in review. [BLOCKER unless the change was made in this review session and the user approved it]
 
 Write `.hackathon/REVIEW.md` (overwrite, max 40 lines):
 - Header: range, date, verdict `PASS` / `WARN` / `FAIL` (FAIL if any BLOCKER).
