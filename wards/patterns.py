@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from wards.config import PLACEHOLDERS
+from wards.config import PIN_DIGITS, PIN_MASK_CHAR, PLACEHOLDERS
 
 _DEVA_DIGIT_TRANS = str.maketrans("०१२३४५६७८९", "0123456789")
 
@@ -36,7 +36,10 @@ _UNIT_FOLLOW_RE = re.compile(
     re.IGNORECASE,
 )
 _NON_DIGIT_RE = re.compile(r"\D")
-_PSN_RE = re.compile(r"^PSN-[0-9A-Z]{6}$")
+_PSN_BODY = r"PSN-[0-9A-Z]{6}"
+_PSN_RE = re.compile(rf"^{_PSN_BODY}$")
+# Tokens a later stage must never rewrite: typed placeholders and pseudonyms.
+PROTECTED_TOKEN_RE = re.compile(rf"\[[A-Z_]+\]|{_PSN_BODY}")
 _DATE_LIKE_RE = re.compile(r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$")
 
 # Leading/trailing boundary guards: allow prose punctuation (e.g. trailing '.') unless followed by alphanumeric
@@ -63,6 +66,16 @@ _PHONE_RE = re.compile(
     rf"{_LB}(?:\+?91[ \t-]?|0[ \t-]?)?[6-9](?:[ \t-]?\d){{9}}{_RB}"
 )
 _PAN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{5}\d{4}[A-Z](?![A-Za-z0-9])")
+
+
+def is_email(value: str) -> bool:
+    """True if the whole value has the email shape used by the R6 detector. O(len)."""
+    return _EMAIL_RE.fullmatch(value) is not None
+
+
+def is_pan(value: str) -> bool:
+    """True if the whole value has the PAN shape (5 letters, 4 digits, 1 letter). O(len)."""
+    return _PAN_RE.fullmatch(value) is not None
 _INSURANCE_LABEL_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_])(?:PMJAY|Insurance|Policy|TPA|Scheme)[ \t]*(?:ID|No\.?|Number)?[ \t]*:[ \t]*"
     r"(?P<val>[A-Za-z0-9/-]*[A-Za-z0-9])(?![A-Za-z0-9])(?![./-][A-Za-z0-9])"
@@ -171,6 +184,7 @@ def _collect_spans(
     *,
     allow_lowercase_mrn: bool = False,
     mrn_cores: frozenset[str] = frozenset(),
+    redact_dob: bool = True,
 ) -> list[tuple[int, int, str]]:
     """Collect non-overlapping R6 PII spans in priority order using an O(bytes) occupancy mask.
 
@@ -251,10 +265,11 @@ def _collect_spans(
             if m.group(0) in mrn_cores:
                 _add(m.start(), m.end(), "MRN")
 
-    for m in _DOB_LABEL_RE.finditer(ascii_text):
-        end, val = _trim_sentence_punct(ascii_text, m.start("val"), m.end("val"))
-        if any(ch.isdigit() for ch in val):
-            _add(m.start("val"), end, "DOB")
+    if redact_dob:
+        for m in _DOB_LABEL_RE.finditer(ascii_text):
+            end, val = _trim_sentence_punct(ascii_text, m.start("val"), m.end("val"))
+            if any(ch.isdigit() for ch in val):
+                _add(m.start("val"), end, "DOB")
 
     for m in _VILLAGE_LABEL_RE.finditer(ascii_text):
         end, val = _trim_sentence_punct(ascii_text, m.start("val"), m.end("val"))
@@ -303,8 +318,22 @@ def extract_mrn_tokens(text: str) -> list[str]:
     return [text[s:e] for s, e, kind in find_identifier_spans(text) if kind == "MRN"]
 
 
-def redact_identifiers(text: str) -> tuple[str, int]:
+def pin_prefix_mask(pin: str, prefix_digits: int) -> str:
+    """Keep the leading prefix_digits of a 6-digit PIN and mask the rest (R13). O(1)."""
+    keep = max(1, min(PIN_DIGITS, prefix_digits))
+    return pin[:keep] + PIN_MASK_CHAR * (PIN_DIGITS - keep)
+
+
+def redact_identifiers(
+    text: str,
+    *,
+    redact_dob: bool = True,
+    pin_prefix_digits: int | None = None,
+) -> tuple[str, int]:
     """Replace R6 identifiers and phones in text with typed placeholders.
+
+    PINs are always detected; with pin_prefix_digits set (R13 policy) they keep that prefix
+    instead of the placeholder.
 
     Devanagari digits are mapped 1-to-1 to ASCII so character offsets match original text.
     Preserves PSN-XXXXXX tokens, doses, frequencies, and lab values.
@@ -313,7 +342,7 @@ def redact_identifiers(text: str) -> tuple[str, int]:
     if not text:
         return text, 0
     ascii_text = normalise_digits(text)
-    spans = _collect_spans(ascii_text)
+    spans = _collect_spans(ascii_text, redact_dob=redact_dob)
     if not spans:
         return text, 0
 
@@ -321,7 +350,10 @@ def redact_identifiers(text: str) -> tuple[str, int]:
     cursor = 0
     for start, end, kind in spans:
         parts.append(text[cursor:start])
-        parts.append(PLACEHOLDERS[kind])
+        if kind == "PIN" and pin_prefix_digits is not None:
+            parts.append(pin_prefix_mask(ascii_text[start:end], pin_prefix_digits))
+        else:
+            parts.append(PLACEHOLDERS[kind])
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts), len(spans)

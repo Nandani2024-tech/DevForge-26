@@ -611,6 +611,52 @@ NON_NAME_WORDS = frozenset(
     }
 ) | COMPLAINT_WORDS | CLINICAL_HEAD_NOUNS | NAME_LABEL_STOP_WORDS
 
+# R10 linkage tiers (normalised strong-ID type names from wards.linkage.normalise_strong_id).
+# Lifelong person IDs (UIDAI Aadhaar, NHA ABHA number, Income Tax PAN): one value per person,
+# so two different values in one cluster are a conflict. Every other strong-ID type is a link
+# edge only and never a conflict.
+LINK_LIFELONG_ID_TYPES = frozenset({"aadhaar", "abha", "pan"})
+# Contact handles can be shared inside a family; on a conflict they are dropped before
+# per-issuer IDs (hospital MRN/UHID/IPD, insurance policy numbers).
+LINK_CONTACT_ID_TYPES = frozenset({"phone", "email", "abha_address"})
+# Per-issuer IDs are matched on their digit core; fewer digits than this is not an ID.
+LINK_MIN_ID_DIGITS = 4
+# Digit counts of lifelong IDs: Aadhaar 12 (UIDAI), ABHA number 14 (NHA ABDM).
+AADHAAR_DIGITS = 12
+ABHA_DIGITS = 14
+
+# R13 PIN generalisation: India Post PIN codes have 6 digits; dropped digits become this mark.
+PIN_DIGITS = 6
+PIN_MASK_CHAR = "*"
+# Highest number read as an age in years (oldest verified human lifespan is 122).
+MAX_VALID_AGE = 125
+
+# R13 field-meaning words in English, Hindi (Devanagari) and Hinglish. Sources: English and
+# Hindi vocabulary; Indian address hierarchy (Census of India: district > tehsil); India Post.
+AGE_LABEL_WORDS = ("age", "umar", "आयु", "उम्र")
+AGE_UNIT_WORDS = ("y", "yr", "yrs", "year", "years", "वर्ष", "साल")
+SEX_LABEL_WORDS = ("sex", "gender", "ling", "लिंग")
+SEX_VALUE_WORDS = ("m", "f", "male", "female", "पुरुष", "महिला", "स्त्री")
+DISTRICT_MARKER_WORDS = ("distt.", "distt", "district", "जिला")
+TEHSIL_MARKER_WORDS = ("tehsil", "तहसील")
+# policy.yaml location_level value that keeps the tehsil (sub-district) as well as the district.
+LOCATION_LEVEL_TEHSIL = "tehsil"
+# Location parts below the kept level (house, locality, landmark, village): always removed, and a
+# record that loses one counts as generalised (R13).
+LOCATION_DETAIL_KINDS = frozenset({"VILLAGE", "HOUSE", "LOCALITY", "LANDMARK"})
+PIN_LABEL_WORDS = ("pin", "pincode", "pin code", "postal code", "पिन")
+
+# R12 date parsing. Years outside [DATE_MIN_YEAR, DATE_MAX_YEAR] are not read as dates.
+DATE_MIN_YEAR = 1900
+DATE_MAX_YEAR = 2099
+# Two-digit years >= this pivot are 19xx, else 20xx: DOBs back to 1930, visits up to 2029.
+TWO_DIGIT_YEAR_PIVOT = 30
+# A date written without a year takes the year of the first full date in the same text;
+# with none, this leap year, so every day-month pair (incl. 29 Feb) parses.
+YEARLESS_REFERENCE_YEAR = 2000
+# English month abbreviations missing from calendar.month_abbr (Oxford style "Sept").
+MONTH_ABBR_VARIANTS = {"sept": 9}
+
 REQUIRED_POLICY_KEYS = (
     "age_band_years",
     "age_top_code",

@@ -123,7 +123,7 @@ def test_missing_secret_exits_nonzero_without_report(tmp_path: Path, repo_root: 
 def test_bulk_export_linear_scaling(tmp_path: Path) -> None:
     timings: list[float] = []
     policy = load_policy()
-    for n_rows in (1000, 5000):
+    for n_rows in (1000, 10000):
         inp = tmp_path / f"in_{n_rows}"
         out = tmp_path / f"out_{n_rows}"
         inp.mkdir()
@@ -134,9 +134,9 @@ def test_bulk_export_linear_scaling(tmp_path: Path) -> None:
         timings.append(time.monotonic() - t0)
         assert res.report["counts"]["records_processed"] == n_rows
 
-    assert timings[1] < 2.0
-    # 5x records should stay well below quadratic scaling (< 12x time even with process noise)
-    assert timings[1] <= max(0.5, timings[0] * 12.0)
+    # Growth ratio, not absolute seconds (machine and suite-load independent): 10x records must
+    # take <= 15x time; linear is ~10x, quadratic would be ~100x.
+    assert timings[1] <= timings[0] * 15.0
 
 
 def test_memory_sampler_positive_rss() -> None:

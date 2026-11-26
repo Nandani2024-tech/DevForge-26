@@ -34,10 +34,12 @@ drug | wards/columns.py | _PRESERVE_EXACT_TOKENS | clinical vocabulary (medicati
 drug | wards/slots.py | _NON_PATIENT_TOKENS | clinical vocabulary (medication)
 email | wards/columns.py | _EMAIL_TOKENS | contact schema field
 email | wards/columns.py | classify_header_tokens | contact schema field
+email | wards/config.py | LINK_CONTACT_ID_TYPES | contact schema field
 email | wards/config.py | NAME_LABEL_STOP_WORDS | contact schema field
 email | wards/config.py | PLACEHOLDERS | contact schema field
 email | wards/patterns.py | _collect_spans | contact schema field
 email | wards/patterns.py | classify_value_shape | contact schema field
+email | wards/pipeline.py | _STRONG_ID_KINDS | contact schema field
 email | wards/slots.py | _SECONDARY_ID_TOKENS | contact schema field
 empty | wards/ingest.py | read_and_parse | English word (reason code)
 export | wards/columns.py | is_metadata_key | English schema word (export metadata)
@@ -107,14 +109,20 @@ patient | wards/names.py | _DIRECT_NAME_RULES | clinical schema word
 patient | wards/names.py | _collect_name_spans | clinical schema word
 patient | wards/patterns.py | _MRN_LABEL_RE | clinical schema word
 patient | wards/pipeline.py | _harvest_json_evidence | clinical schema word
+patient | wards/pipeline.py | _harvest_json_record_and_channels | clinical schema word
 patient | wards/pipeline.py | _harvest_parsed_evidence | clinical schema word
 patient | wards/pipeline.py | _process_csv | clinical schema word
 patient | wards/pipeline.py | _process_json | clinical schema word
 patient | wards/pipeline.py | _process_text | clinical schema word
 patient | wards/pipeline.py | run_pipeline | clinical schema word
 patient | wards/slots.py | _PATIENT_NOUN_TOKENS | clinical schema word
+patient | wards/slots.py | _PSN_TEXT_SLOT_KINDS | clinical schema word
 patient | wards/slots.py | _TEXT_LABEL_RE | clinical schema word
+patient | wards/slots.py | _find_json_name_fallback | clinical schema word
+patient | wards/slots.py | find_csv_slot_or_fallback | clinical schema word
+patient | wards/slots.py | inject_psn_into_text | clinical schema word
 patient | wards/slots.py | replace_fhir_slot | clinical schema word
+patient | wards/slots.py | write_fhir_slot_psn | clinical schema word
 patients | wards/config.py | CHANNEL_SAFE_WORDS | clinical schema word
 pdf | wards/config.py | CHANNEL_SAFE_WORDS | file format extension
 pin | config/policy.yaml | pin_prefix_digits | Indian postal code (PIN) field
@@ -122,15 +130,26 @@ pin | wards/columns.py | _PIN_TOKENS | Indian postal code (PIN) field
 pin | wards/columns.py | classify_header_tokens | Indian postal code (PIN) field
 pin | wards/columns.py | classify_json_key | Indian postal code (PIN) field
 pin | wards/config.py | NAME_LABEL_STOP_WORDS | Indian postal code (PIN) field
+pin | wards/config.py | PIN_LABEL_WORDS | Indian postal code (PIN) field
 pin | wards/config.py | PLACEHOLDERS | Indian postal code (PIN) field
 pin | wards/config.py | REQUIRED_POLICY_KEYS | Indian postal code (PIN) field
 pin | wards/config.py | _INT_POLICY_KEYS | Indian postal code (PIN) field
 pin | wards/config.py | load_policy | Indian postal code (PIN) field
+pin | wards/generalise.py | _PIN_6_RE | Indian postal code (PIN) field
+pin | wards/generalise.py | _PIN_LABEL_RE | Indian postal code (PIN) field
+pin | wards/generalise.py | generalise_pin_str | Indian postal code (PIN) field
+pin | wards/generalise.py | generalise_text_qis | Indian postal code (PIN) field
 pin | wards/patterns.py | _collect_spans | Indian postal code (PIN) field
 pin | wards/patterns.py | classify_value_shape | Indian postal code (PIN) field
+pin | wards/patterns.py | redact_identifiers | Indian postal code (PIN) field
+pin | wards/pipeline.py | _STRUCTURED_PII_KINDS | Indian postal code (PIN) field
+pin | wards/pipeline.py | _clean_json_values | Indian postal code (PIN) field
+pin | wards/pipeline.py | _process_csv | Indian postal code (PIN) field
 reference | wards/pipeline.py | _FHIR_PRESERVE_LEAF_KEYS | FHIR Reference element / RFC 6901 reference
 reference | wards/pipeline.py | _clean_json_values | FHIR Reference element / RFC 6901 reference
+reference | wards/pipeline.py | _collect_json_strings | FHIR Reference element / RFC 6901 reference
 reference | wards/pipeline.py | _harvest_json_evidence | FHIR Reference element / RFC 6901 reference
+reference | wards/pipeline.py | _harvest_json_record_and_channels | FHIR Reference element / RFC 6901 reference
 registered | wards/columns.py | _PRESERVE_EXACT_TOKENS | English schema word
 registration | wards/columns.py | _PATIENT_ID_PREFIXES | HIS registration (ADT) term
 registration | wards/config.py | NAME_LABEL_STOP_WORDS | HIS registration (ADT) term
@@ -150,6 +169,7 @@ relative | wards/names.py | _DIRECT_NAME_RULES | relation schema word
 relative | wards/names.py | _POSSESSIVE_ATTENDANT_RE | relation schema word
 relative | wards/names.py | _collect_name_spans | relation schema word
 relative | wards/pipeline.py | _harvest_json_evidence | relation schema word
+relative | wards/pipeline.py | _harvest_json_record_and_channels | relation schema word
 relative | wards/pipeline.py | _harvest_parsed_evidence | relation schema word
 report | wards/cli.py | main | clinical document type / report.json
 report | wards/config.py | DOCUMENT_SUBJECT_NOUNS | clinical document type / report.json

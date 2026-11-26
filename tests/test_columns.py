@@ -65,7 +65,9 @@ def test_json_context_preserves_clinical_names_and_int_types(tmp_path: Path) -> 
     assert san["panels"][0]["name"] == "Complete Blood Count"
     assert san["patient"]["uhid"].startswith("PSN-")
     assert san["patient"]["name"] == PLACEHOLDERS["PATIENT_NAME"]
-    assert san["patient"]["dob"] == PLACEHOLDERS["DOB"]
+    # R12: DOB shifted deterministically preserving ISO format
+    assert san["patient"]["dob"] != "1985-04-12"
+    assert len(san["patient"]["dob"]) == 10 and san["patient"]["dob"][4] == "-" and san["patient"]["dob"][7] == "-"
     assert san["patient"]["district"] == "Lucknow"
     assert isinstance(san["patient"]["aadhar_no"], int)
     assert san["patient"]["aadhar_no"] == 0
@@ -170,9 +172,10 @@ def test_renamed_csv_columns_end_to_end(tmp_path: Path) -> None:
     assert data[0].startswith("PSN-")
     assert data[1] == PLACEHOLDERS["PATIENT_NAME"]
     assert data[2] == PLACEHOLDERS["RELATIVE"]
-    assert data[3] == PLACEHOLDERS["DOB"]
+    # R12 shifts DOB preserving DD/MM/YYYY format; R13 keeps 3-digit PIN prefix
+    assert data[3] != "14/06/1980" and len(data[3]) == 10 and data[3][2] == "/" and data[3][5] == "/"
     assert data[4] == PLACEHOLDERS["VILLAGE"]
-    assert data[5] == PLACEHOLDERS["PIN"]
+    assert data[5] == "226***"
     assert data[6] == PLACEHOLDERS["PHONE"]
     assert data[7] == "Dr. Verma"
     assert data[8] == "Lucknow"

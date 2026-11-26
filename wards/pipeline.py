@@ -1,8 +1,8 @@
-"""End-to-end firewall pipeline: Pass 1 evidence harvest -> R5/R6/R7/R9 redaction -> export & report."""
+"""End-to-end two-pass firewall pipeline: Pass 1 evidence + R10 linkage -> R5-R13 export."""
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,20 +23,39 @@ from wards.columns import (
     is_metadata_key,
     json_dict_key_context,
 )
-from wards.config import NUMERIC_REDACTION_SENTINEL, PLACEHOLDERS, REPORT_SCHEMA, Policy, validate_policy
+from wards.config import (
+    LOCATION_DETAIL_KINDS,
+    NUMERIC_REDACTION_SENTINEL,
+    PLACEHOLDERS,
+    REPORT_SCHEMA,
+    Policy,
+    validate_policy,
+)
+from wards.dates import DATE_ORDER_DMY, infer_date_order, parse_dob_iso, shift_dates_in_text
+from wards.generalise import (
+    generalise_address_field,
+    generalise_age_field,
+    generalise_age_int,
+    generalise_pin_int,
+    generalise_pin_str,
+    generalise_text_qis,
+)
 from wards.ingest import ParsedInput, json_pointer_escape, read_and_parse
+from wards.linkage import RecordEvidence, link_records, normalise_name_key, normalise_strong_id
 from wards.names import extract_name_candidates, redact_names
-from wards.patterns import extract_mrn_tokens, redact_identifiers
-from wards.pseudo import pseudonym, slot_patient_key
+from wards.patterns import extract_mrn_tokens, find_identifier_spans, redact_identifiers
+from wards.pseudo import date_shift_days, pseudonym
 from wards.resources import MemorySampler
 from wards.slots import (
     find_csv_slot,
+    find_csv_slot_or_fallback,
     find_text_slot_span,
+    inject_psn_into_text,
     is_document_json,
-    normalise_slot_value,
-    replace_fhir_slot,
-    replace_json_slot,
+    is_non_patient_id_key,
     select_csv_slot_column,
+    write_fhir_slot_psn,
+    write_json_slot_psn,
 )
 from wards.writers import (
     serialize_csv,
@@ -46,8 +65,11 @@ from wards.writers import (
     write_sanitized_text,
 )
 
-# Structured PII categories whose non-empty cells/leaves are replaced by placeholder constants
-_STRUCTURED_PII_KINDS = frozenset(PLACEHOLDERS)
+# Structured PII categories redacted by placeholder (excludes DOB/PIN handled by R12/R13)
+_STRUCTURED_PII_KINDS = frozenset(PLACEHOLDERS) - frozenset({"DOB", "PIN", "ADDRESS"})
+_STRONG_ID_KINDS = frozenset(
+    {"MRN", "AADHAAR", "ABHA", "ABHA_ADDRESS", "PHONE", "PAN", "INSURANCE", "EMAIL"}
+)
 _FHIR_PRESERVE_LEAF_KEYS = frozenset(
     {"resourceType", "id", "fullUrl", "reference", "system", "code", "status", "url"}
 )
@@ -55,7 +77,7 @@ _FHIR_PRESERVE_LEAF_KEYS = frozenset(
 
 @dataclass
 class PipelineStats:
-    """Mutable counters aggregated during a single pipeline run."""
+    """Mutable counters and active run context shared during pipeline execution."""
 
     identifiers_detected: int = 0
     records_processed: int = 0
@@ -63,6 +85,11 @@ class PipelineStats:
     records_generalized: int = 0
     records_suppressed: int = 0
     records_quarantined: int = 0
+    reason_counts: dict[str, int] = field(default_factory=dict)
+    policy: Policy | None = None
+    active_psn: str | None = None
+    active_offset: int = 0
+    active_date_order: str = DATE_ORDER_DMY
 
 
 @dataclass(frozen=True)
@@ -73,11 +100,43 @@ class PipelineResult:
     records: list[dict[str, Any]]
 
 
-def clean_text(text: str, stats: PipelineStats) -> str:
-    """Replace R6 identifiers/phones and R7 names in free text while preserving line count. O(len(text))."""
-    cleaned, id_count = redact_identifiers(text)
+def clean_text(
+    text: str,
+    stats: PipelineStats,
+    *,
+    offset_days: int | None = None,
+    date_order: str | None = None,
+    policy: Policy | None = None,
+) -> str:
+    """Apply R12 date shift + R6 IDs + R7 names + R13 age/PIN generalisation cleanly. O(len(text))."""
+    eff_policy = policy if policy is not None else stats.policy
+    eff_offset = offset_days if offset_days is not None else stats.active_offset
+    eff_order = date_order if date_order is not None else stats.active_date_order
+
+    working = text
+    if eff_offset != 0:
+        working, _ = shift_dates_in_text(
+            working,
+            eff_offset,
+            order=eff_order,
+            reason_counts=stats.reason_counts,
+        )
+
+    cleaned, id_count = redact_identifiers(
+        working,
+        redact_dob=(eff_policy is None),
+        pin_prefix_digits=(eff_policy.pin_prefix_digits if eff_policy is not None else None),
+    )
     cleaned, name_count = redact_names(cleaned)
-    stats.identifiers_detected += id_count + name_count
+    qi_count = 0
+    if eff_policy is not None:
+        cleaned, qi_count = generalise_text_qis(
+            cleaned,
+            width=eff_policy.age_band_years,
+            top_code=eff_policy.age_top_code,
+            prefix_digits=eff_policy.pin_prefix_digits,
+        )
+    stats.identifiers_detected += id_count + name_count + qi_count
     return cleaned
 
 
@@ -95,7 +154,7 @@ def _traverse_json(
     resource_type: str | None = None,
     parent_path: tuple[str, ...] = (),
 ) -> Any:
-    """Single JSON tree walker shared by Pass 1 evidence harvest and Pass 2 redaction.
+    """Single JSON tree walker shared by Pass 1 harvesting and Pass 2 cleaning/generalisation.
 
     Complexity: O(number of JSON nodes).
     """
@@ -207,24 +266,71 @@ def _traverse_json(
     return value if transform else None
 
 
-def _harvest_json_evidence(
-    value: Any,
+def _collect_json_strings(node: Any) -> list[str]:
+    """Collect string leaves from a JSON node for file-level date-order voting. O(nodes)."""
+    samples: list[str] = []
+
+    def _on_leaf(_sem: str, leaf_val: Any, _pk: str | None, _k: str | None) -> Any:
+        if isinstance(leaf_val, str) and leaf_val.strip():
+            samples.append(leaf_val)
+        return leaf_val
+
+    _traverse_json(node, is_fhir=False, ref_types=None, ref_key="reference", on_leaf=_on_leaf, transform=False)
+    return samples
+
+
+def _harvest_json_record_and_channels(
+    node: Any,
     evidence: ChannelEvidence,
     *,
-    is_fhir: bool = False,
-    ref_types: dict[str, str] | None = None,
-) -> None:
-    """Pass 1: harvest R5/R6/R7 patient/relative name tokens and MRNs via the shared JSON walker."""
+    is_fhir: bool,
+    ref_types: dict[str, str] | None,
+    date_order: str,
+    record_id: int,
+    input_rel: str,
+    loc: str,
+    parent_key: str | None = None,
+) -> RecordEvidence:
+    """Walk one JSON record/document to feed Pass 1 ChannelEvidence and build RecordEvidence.
+
+    parent_key is the input key holding node when a top-level value is walked on its own. O(nodes).
+    """
+    strong_set: set[tuple[str, str]] = set()
+    name_parts: list[str] = []
+    rel_parts: list[str] = []
+    dob_iso: str | None = None
+
+    def _add_strong(kind: str, raw_val: str, key: str | None = None) -> None:
+        if key is not None and is_non_patient_id_key(key):
+            return  # visit/bill/sample IDs are not patient evidence (R10)
+        norm = normalise_strong_id(kind, raw_val)
+        if norm is not None:
+            strong_set.add(norm)
 
     def _on_leaf(semantic: str, leaf_val: Any, p_key: str | None, key: str | None) -> Any:
+        nonlocal dob_iso
+        if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
+            if semantic in _STRONG_ID_KINDS:
+                _add_strong(semantic, str(leaf_val), key)
+            return leaf_val
         if not isinstance(leaf_val, str) or not leaf_val.strip():
             return leaf_val
         if key is None and not p_key:
             return leaf_val
-        if semantic in ("PATIENT_NAME", "RELATIVE"):
+
+        if semantic == "PATIENT_NAME":
             evidence.add_name(leaf_val, semantic)
-        elif semantic == "MRN":
-            evidence.add_mrn(leaf_val)
+            name_parts.append(leaf_val)
+        elif semantic == "RELATIVE":
+            evidence.add_name(leaf_val, semantic)
+            rel_parts.append(leaf_val)
+        elif semantic in _STRONG_ID_KINDS:
+            if semantic == "MRN":
+                evidence.add_mrn(leaf_val)
+            _add_strong(semantic, leaf_val, key)
+        elif semantic == "DOB":
+            if dob_iso is None:
+                dob_iso = parse_dob_iso(leaf_val, order=date_order)
         elif (
             semantic == "FREE_TEXT"
             and not looks_like_path_or_url(leaf_val)
@@ -232,65 +338,234 @@ def _harvest_json_evidence(
         ):
             for surf, kind in extract_name_candidates(leaf_val):
                 evidence.add_name(surf, kind)
-            for mrn_tok in extract_mrn_tokens(leaf_val):
-                evidence.add_mrn(mrn_tok)
+                if kind == "PATIENT_NAME":
+                    name_parts.append(surf)
+                else:
+                    rel_parts.append(surf)
+            for s, e, kind in find_identifier_spans(leaf_val):
+                sub = leaf_val[s:e]
+                if kind == "MRN":
+                    evidence.add_mrn(sub)
+                if kind in _STRONG_ID_KINDS:
+                    _add_strong(kind, sub)
+                elif kind == "DOB" and dob_iso is None:
+                    dob_iso = parse_dob_iso(sub, order=date_order)
         return leaf_val
 
     _traverse_json(
-        value,
+        node,
         is_fhir=is_fhir,
         ref_types=ref_types,
         ref_key="reference",
         on_leaf=_on_leaf,
         transform=False,
+        parent_key=parent_key,
+        parent_path=(parent_key,) if parent_key else (),
+    )
+
+    name_key = normalise_name_key(" ".join(name_parts)) if name_parts else None
+    rel_key = normalise_name_key(" ".join(rel_parts)) if rel_parts else None
+    return RecordEvidence(
+        record_id=record_id,
+        input_rel=input_rel,
+        loc=loc,
+        strong_ids=tuple(sorted(strong_set)),
+        name_key=name_key,
+        dob_iso=dob_iso,
+        rel_key=rel_key,
     )
 
 
-def _harvest_parsed_evidence(parsed: ParsedInput, evidence: ChannelEvidence) -> None:
-    """Pass 1: collect verified patient/relative name tokens and MRN cores from one parsed file.
+def _harvest_parsed_evidence(
+    parsed: ParsedInput,
+    evidence: ChannelEvidence,
+    next_record_id: int,
+) -> tuple[list[RecordEvidence], int]:
+    """Pass 1: harvest channel evidence and compact RecordEvidence tuples for one file.
 
-    Never harvests doctor tokens. Keeps only tokens/cores in memory.
     Complexity: O(bytes in parsed).
     """
+    recs: list[RecordEvidence] = []
+
     if parsed.kind == "csv":
         assert parsed.rows is not None
         header = parsed.rows[0]
         body = parsed.rows[1:]
         preferred_col = select_csv_slot_column(header, body)
         col_types = classify_csv_columns(header, body)
-        for row in body:
+        file_order = infer_date_order(cell for row in body for cell in row)
+        col_orders = [
+            infer_date_order(row[idx] for row in body if idx < len(row))
+            if any(idx < len(row) and row[idx].strip() for row in body)
+            else file_order
+            for idx in range(len(header))
+        ]
+
+        for row_idx, row in enumerate(body):
+            strong_set: set[tuple[str, str]] = set()
+            name_parts: list[str] = []
+            rel_parts: list[str] = []
+            dob_iso: str | None = None
+
             slot = find_csv_slot(header, row, preferred_col=preferred_col)
             if slot is not None:
                 evidence.add_mrn(slot[1])
+                slot_kind = col_types[slot[0]] if slot[0] < len(col_types) else "MRN"
+                id_type = slot_kind if slot_kind in _STRONG_ID_KINDS else "MRN"
+                norm = normalise_strong_id(id_type, slot[1])
+                if norm is not None:
+                    strong_set.add(norm)
+
             for idx, cell in enumerate(row):
                 if not cell.strip():
                     continue
                 col_kind = col_types[idx] if idx < len(col_types) else "FREE_TEXT"
-                if col_kind in ("PATIENT_NAME", "RELATIVE"):
+                if col_kind == "PATIENT_NAME":
                     evidence.add_name(cell, col_kind)
-                elif col_kind == "MRN":
-                    evidence.add_mrn(cell)
+                    name_parts.append(cell)
+                elif col_kind == "RELATIVE":
+                    evidence.add_name(cell, col_kind)
+                    rel_parts.append(cell)
+                elif col_kind in _STRONG_ID_KINDS:
+                    if col_kind == "MRN":
+                        evidence.add_mrn(cell)
+                    if idx < len(header) and is_non_patient_id_key(header[idx]):
+                        continue  # visit/bill/sample IDs are not patient evidence (R10)
+                    norm = normalise_strong_id(col_kind, cell)
+                    if norm is not None:
+                        strong_set.add(norm)
+                elif col_kind == "DOB":
+                    if dob_iso is None:
+                        order = col_orders[idx] if idx < len(col_orders) else file_order
+                        dob_iso = parse_dob_iso(cell, order=order)
                 elif col_kind == "FREE_TEXT":
                     for surf, kind in extract_name_candidates(cell):
                         evidence.add_name(surf, kind)
-                    for mrn_tok in extract_mrn_tokens(cell):
-                        evidence.add_mrn(mrn_tok)
-        return
+                        if kind == "PATIENT_NAME":
+                            name_parts.append(surf)
+                        else:
+                            rel_parts.append(surf)
+                    for s, e, kind in find_identifier_spans(cell):
+                        sub = cell[s:e]
+                        if kind == "MRN":
+                            evidence.add_mrn(sub)
+                        if kind in _STRONG_ID_KINDS:
+                            norm = normalise_strong_id(kind, sub)
+                            if norm is not None:
+                                strong_set.add(norm)
+                        elif kind == "DOB" and dob_iso is None:
+                            dob_iso = parse_dob_iso(sub, order=file_order)
+
+            recs.append(
+                RecordEvidence(
+                    record_id=next_record_id,
+                    input_rel=parsed.rel_posix,
+                    loc=f"row:{row_idx}",
+                    strong_ids=tuple(sorted(strong_set)),
+                    name_key=normalise_name_key(" ".join(name_parts)) if name_parts else None,
+                    dob_iso=dob_iso,
+                    rel_key=normalise_name_key(" ".join(rel_parts)) if rel_parts else None,
+                )
+            )
+            next_record_id += 1
+        return recs, next_record_id
 
     if parsed.kind in ("json", "fhir"):
         is_fhir = parsed.kind == "fhir"
         ref_types = build_fhir_fullurl_map(parsed.data) if is_fhir else None
-        _harvest_json_evidence(parsed.data, evidence, is_fhir=is_fhir, ref_types=ref_types)
-        return
+        date_order = infer_date_order(_collect_json_strings(parsed.data))
+
+        if is_fhir or is_document_json(parsed.data):
+            recs.append(
+                _harvest_json_record_and_channels(
+                    parsed.data,
+                    evidence,
+                    is_fhir=is_fhir,
+                    ref_types=ref_types,
+                    date_order=date_order,
+                    record_id=next_record_id,
+                    input_rel=parsed.rel_posix,
+                    loc="doc",
+                )
+            )
+            next_record_id += 1
+        else:
+            for key, val in parsed.data.items():
+                if isinstance(val, list) and val and all(isinstance(item, dict) for item in val):
+                    for idx, item in enumerate(val):
+                        recs.append(
+                            _harvest_json_record_and_channels(
+                                item,
+                                evidence,
+                                is_fhir=False,
+                                ref_types=None,
+                                date_order=date_order,
+                                record_id=next_record_id,
+                                input_rel=parsed.rel_posix,
+                                loc=f"/{key}/{idx}",
+                                parent_key=key,
+                            )
+                        )
+                        next_record_id += 1
+                else:
+                    # Not a record list (index map, export metadata): channel evidence only,
+                    # it is not a patient record, so its RecordEvidence is not kept.
+                    _harvest_json_record_and_channels(
+                        val,
+                        evidence,
+                        is_fhir=False,
+                        ref_types=None,
+                        date_order=date_order,
+                        record_id=next_record_id,
+                        input_rel=parsed.rel_posix,
+                        loc=f"/{key}",
+                        parent_key=key,
+                    )
+        return recs, next_record_id
 
     assert parsed.text is not None
-    span = find_text_slot_span(parsed.text)
+    text = parsed.text
+    date_order = infer_date_order([text])
+    strong_set = set()
+    name_parts = []
+    rel_parts = []
+    dob_iso = None
+
+    span = find_text_slot_span(text)
     if span is not None:
         evidence.add_mrn(span[2])
-    for mrn_tok in extract_mrn_tokens(parsed.text):
+        norm = normalise_strong_id("MRN", span[2])
+        if norm is not None:
+            strong_set.add(norm)
+    for mrn_tok in extract_mrn_tokens(text):
         evidence.add_mrn(mrn_tok)
-    for surf, kind in extract_name_candidates(parsed.text):
+    for s, e, kind in find_identifier_spans(text):
+        sub = text[s:e]
+        if kind in _STRONG_ID_KINDS:
+            norm = normalise_strong_id(kind, sub)
+            if norm is not None:
+                strong_set.add(norm)
+        elif kind == "DOB" and dob_iso is None:
+            dob_iso = parse_dob_iso(sub, order=date_order)
+    for surf, kind in extract_name_candidates(text):
         evidence.add_name(surf, kind)
+        if kind == "PATIENT_NAME":
+            name_parts.append(surf)
+        else:
+            rel_parts.append(surf)
+
+    recs.append(
+        RecordEvidence(
+            record_id=next_record_id,
+            input_rel=parsed.rel_posix,
+            loc="doc",
+            strong_ids=tuple(sorted(strong_set)),
+            name_key=normalise_name_key(" ".join(name_parts)) if name_parts else None,
+            dob_iso=dob_iso,
+            rel_key=normalise_name_key(" ".join(rel_parts)) if rel_parts else None,
+        )
+    )
+    return recs, next_record_id + 1
 
 
 def _clean_json_values(
@@ -298,23 +573,65 @@ def _clean_json_values(
     stats: PipelineStats,
     protected: set[tuple[int, str]],
     evidence: ChannelEvidence,
+    policy: Policy,
+    offset_days: int,
+    date_order: str,
     preserve_fhir_refs: bool = False,
     ref_types: dict[str, str] | None = None,
+    parent_key: str | None = None,
 ) -> Any:
-    """Clean JSON keys, path/URL metadata, and leaves via the shared JSON walker.
+    """Clean JSON keys, shift dates, generalise QIs, and clean text via shared walker. O(nodes).
 
-    Complexity: O(number of JSON nodes + total string bytes).
+    parent_key is the input key that holds value when a top-level value is cleaned on its own,
+    so its keys and leaves keep their meaning context (R5, R9).
     """
+    generalised = False
 
     def _on_leaf(semantic: str, leaf_val: Any, p_key: str | None, key: str | None) -> Any:
+        nonlocal generalised
         if isinstance(leaf_val, str):
             if not leaf_val.strip():
                 return leaf_val
+            if semantic == "DOB":
+                shifted, _ = shift_dates_in_text(
+                    leaf_val,
+                    offset_days,
+                    order=date_order,
+                    reason_counts=stats.reason_counts,
+                )
+                generalised = True
+                return shifted
+            if semantic == "AGE":
+                banded, cnt = generalise_age_field(leaf_val, policy.age_band_years, policy.age_top_code)
+                if cnt > 0:
+                    stats.identifiers_detected += cnt
+                    generalised = True
+                return banded
+            if semantic == "PIN":
+                masked, cnt = generalise_pin_str(leaf_val, policy.pin_prefix_digits)
+                if cnt > 0:
+                    stats.identifiers_detected += cnt
+                    generalised = True
+                return masked
+            if semantic == "ADDRESS":
+                addr, cnt = generalise_address_field(leaf_val, policy.location_level, policy.pin_prefix_digits)
+                if cnt > 0:
+                    stats.identifiers_detected += cnt
+                    generalised = True
+                return addr
             if semantic in _STRUCTURED_PII_KINDS:
                 stats.identifiers_detected += 1
+                if semantic in LOCATION_DETAIL_KINDS:
+                    generalised = True
                 return PLACEHOLDERS[semantic]
             if semantic == "PRESERVE_EXACT":
-                return leaf_val
+                shifted, _ = shift_dates_in_text(
+                    leaf_val,
+                    offset_days,
+                    order=date_order,
+                    reason_counts=stats.reason_counts,
+                )
+                return shifted
             if looks_like_path_or_url(leaf_val):
                 c_val, cnt = clean_path_or_url(leaf_val, evidence, filename_safe=False)
                 stats.identifiers_detected += cnt
@@ -322,11 +639,19 @@ def _clean_json_values(
             if key is not None and is_metadata_key(p_key, key):
                 c_val, cnt = clean_channel_text(leaf_val, evidence, filename_safe=False)
                 stats.identifiers_detected += cnt
-                return clean_text(c_val, stats)
-            return clean_text(leaf_val, stats)
+                return clean_text(c_val, stats, offset_days=offset_days, date_order=date_order, policy=policy)
+            return clean_text(leaf_val, stats, offset_days=offset_days, date_order=date_order, policy=policy)
+
         if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
-            # Preserve integer JSON value type while removing numeric PII (e.g. integer Aadhaar/PIN)
-            if semantic in _STRUCTURED_PII_KINDS:
+            if semantic == "AGE":
+                generalised = True
+                stats.identifiers_detected += 1
+                return generalise_age_int(leaf_val, policy.age_band_years, policy.age_top_code)
+            if semantic == "PIN":
+                generalised = True
+                stats.identifiers_detected += 1
+                return generalise_pin_int(leaf_val, policy.pin_prefix_digits)
+            if semantic in _STRUCTURED_PII_KINDS or semantic == "DOB":
                 stats.identifiers_detected += 1
                 return NUMERIC_REDACTION_SENTINEL
         return leaf_val
@@ -337,7 +662,7 @@ def _clean_json_values(
         stats.identifiers_detected += key_clean_count
         return out_keys
 
-    return _traverse_json(
+    result = _traverse_json(
         value,
         is_fhir=preserve_fhir_refs,
         ref_types=ref_types,
@@ -346,7 +671,12 @@ def _clean_json_values(
         on_dict_keys=_on_dict_keys,
         protected=protected,
         transform=True,
+        parent_key=parent_key,
+        parent_path=(parent_key,) if parent_key else (),
     )
+    if generalised:
+        stats.records_generalized += 1
+    return result
 
 
 def _process_csv(
@@ -354,13 +684,25 @@ def _process_csv(
     make_psn: Any,
     stats: PipelineStats,
     evidence: ChannelEvidence,
+    *,
+    link_map: dict[tuple[str, str], tuple[str | None, int]] | None = None,
+    policy: Policy | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Process one CSV/TSV file with column classification, header cleaning, and slot PSN. O(cells)."""
+    """Process one CSV/TSV file with linkage PSNs, R12 date shifts, and R13 QI generalisation."""
     assert parsed.rows is not None
+    eff_policy = policy if policy is not None else stats.policy
+    assert eff_policy is not None
     header = parsed.rows[0]
     body = parsed.rows[1:]
     preferred_col = select_csv_slot_column(header, body)
     col_types = classify_csv_columns(header, body)
+    file_order = infer_date_order(cell for row in body for cell in row)
+    col_orders = [
+        infer_date_order(row[idx] for row in body if idx < len(row))
+        if any(idx < len(row) and row[idx].strip() for row in body)
+        else file_order
+        for idx in range(len(header))
+    ]
     cleaned_header, hdr_cnt = clean_csv_header(header, evidence)
     stats.identifiers_detected += hdr_cnt
 
@@ -368,33 +710,91 @@ def _process_csv(
     recs: list[dict[str, Any]] = []
 
     for row_idx, row in enumerate(body):
-        slot = find_csv_slot(header, row, preferred_col=preferred_col)
-        slot_col = slot[0] if slot is not None else None
-        psn = make_psn(normalise_slot_value(slot[1])) if slot is not None else None
+        raw_loc = f"row:{row_idx}"
+        if link_map is not None and (parsed.rel_posix, raw_loc) in link_map:
+            psn, offset_days = link_map[(parsed.rel_posix, raw_loc)]
+        else:
+            slot = find_csv_slot(header, row, preferred_col=preferred_col)
+            psn = make_psn(slot[1]) if slot is not None else None
+            offset_days = 0
 
+        slot_col = find_csv_slot_or_fallback(
+            header,
+            row,
+            col_types,
+            preferred_col=preferred_col,
+            allow_name_fallback=(psn is not None),
+        )
+
+        row_generalised = False
         out_row: list[str] = []
         for idx, cell in enumerate(row):
-            if idx == slot_col and psn is not None:
-                out_row.append(psn)
+            if idx == slot_col:
+                out_row.append(_slot_value(psn))
                 continue
             col_kind = col_types[idx] if idx < len(col_types) else "FREE_TEXT"
-            if col_kind in _STRUCTURED_PII_KINDS:
+            col_order = col_orders[idx] if idx < len(col_orders) else file_order
+            if col_kind == "DOB":
+                shifted, _ = shift_dates_in_text(
+                    cell,
+                    offset_days,
+                    order=col_order,
+                    reason_counts=stats.reason_counts,
+                )
+                if cell.strip():
+                    row_generalised = True
+                out_row.append(shifted)
+            elif col_kind == "AGE":
+                banded, cnt = generalise_age_field(cell, eff_policy.age_band_years, eff_policy.age_top_code)
+                if cnt > 0:
+                    stats.identifiers_detected += cnt
+                    row_generalised = True
+                out_row.append(banded)
+            elif col_kind == "PIN":
+                masked, cnt = generalise_pin_str(cell, eff_policy.pin_prefix_digits)
+                if cnt > 0:
+                    stats.identifiers_detected += cnt
+                    row_generalised = True
+                out_row.append(masked)
+            elif col_kind == "ADDRESS":
+                addr, cnt = generalise_address_field(
+                    cell,
+                    eff_policy.location_level,
+                    eff_policy.pin_prefix_digits,
+                )
+                if cnt > 0:
+                    stats.identifiers_detected += cnt
+                    row_generalised = True
+                out_row.append(addr)
+            elif col_kind in _STRUCTURED_PII_KINDS:
                 if cell.strip():
                     stats.identifiers_detected += 1
+                    if col_kind in LOCATION_DETAIL_KINDS:
+                        row_generalised = True
                     out_row.append(PLACEHOLDERS[col_kind])
                 else:
                     out_row.append(cell)
             elif col_kind == "PRESERVE_EXACT":
-                out_row.append(cell)
+                shifted, _ = shift_dates_in_text(
+                    cell,
+                    offset_days,
+                    order=col_order,
+                    reason_counts=stats.reason_counts,
+                )
+                out_row.append(shifted)
             elif looks_like_path_or_url(cell):
                 c_val, cnt = clean_path_or_url(cell, evidence, filename_safe=False)
                 stats.identifiers_detected += cnt
                 out_row.append(c_val)
             else:
-                out_row.append(clean_text(cell, stats))
+                out_row.append(
+                    clean_text(cell, stats, offset_days=offset_days, date_order=file_order, policy=eff_policy)
+                )
 
+        if row_generalised:
+            stats.records_generalized += 1
         out_rows.append(out_row)
-        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": f"row:{row_idx}", "patient": psn})
+        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": raw_loc, "patient": psn})
         stats.records_processed += 1
         if psn is not None:
             stats.records_linked += 1
@@ -402,67 +802,144 @@ def _process_csv(
     return serialize_csv(out_rows, parsed.delimiter), recs
 
 
+def _slot_value(psn: str | None) -> str:
+    """Value written into a record's patient-ID slot: the PSN, or the ID placeholder when the
+    patient is null, so an original ID never survives in its slot (R11, R6). O(1)."""
+    return psn if psn is not None else PLACEHOLDERS["MRN"]
+
+
 def _process_json(
     parsed: ParsedInput,
     make_psn: Any,
     stats: PipelineStats,
     evidence: ChannelEvidence,
+    *,
+    link_map: dict[tuple[str, str], tuple[str | None, int]] | None = None,
+    policy: Policy | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Process one JSON or FHIR Bundle file. O(nodes)."""
+    """Process one JSON or FHIR Bundle file with cluster PSNs, R12 date shifts, and R13 QIs."""
+    eff_policy = policy if policy is not None else stats.policy
+    assert eff_policy is not None
     data = parsed.data
+    date_order = infer_date_order(_collect_json_strings(data))
     protected: set[tuple[int, str]] = set()
     recs: list[dict[str, Any]] = []
     is_fhir = parsed.kind == "fhir"
+    ref_types = build_fhir_fullurl_map(data) if is_fhir else None
 
     if is_fhir:
-        psn, prot = replace_fhir_slot(data, make_psn)
+        psn, offset_days = (
+            link_map[(parsed.rel_posix, "doc")]
+            if link_map is not None and (parsed.rel_posix, "doc") in link_map
+            else (None, 0)
+        )
+        prot = write_fhir_slot_psn(data, _slot_value(psn), allow_name_fallback=psn is not None)
         if prot is not None:
             protected.add(prot)
         recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": psn})
         stats.records_processed += 1
         if psn is not None:
             stats.records_linked += 1
-    elif is_document_json(data):
-        psn, prot = replace_json_slot(data, make_psn)
-        if prot is not None:
-            protected.add(prot)
-        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": psn})
-        stats.records_processed += 1
-        if psn is not None:
-            stats.records_linked += 1
-    else:
-        orig_top_keys = list(data.keys())
-        cleaned_top_keys, _ = clean_dict_keys(orig_top_keys, evidence)
-        top_key_map = dict(zip(orig_top_keys, cleaned_top_keys))
-        for key, val in data.items():
-            if isinstance(val, list) and val and all(isinstance(item, dict) for item in val):
-                # Never emit a raw PII key into a records.jsonl pointer (SPEC sec 6 / R17)
-                escaped_key = json_pointer_escape(str(top_key_map[key]))
-                for idx, item in enumerate(val):
-                    psn, prot = replace_json_slot(item, make_psn)
-                    if prot is not None:
-                        protected.add(prot)
-                    recs.append(
-                        {
-                            "file": f"sanitized/{parsed.rel_posix}",
-                            "loc": f"/{escaped_key}/{idx}",
-                            "patient": psn,
-                        }
-                    )
-                    stats.records_processed += 1
-                    if psn is not None:
-                        stats.records_linked += 1
+        cleaned = _clean_json_values(
+            data,
+            stats,
+            protected,
+            evidence,
+            eff_policy,
+            offset_days,
+            date_order,
+            preserve_fhir_refs=True,
+            ref_types=ref_types,
+        )
+        return serialize_json(cleaned), recs
 
-    ref_types = build_fhir_fullurl_map(data) if is_fhir else None
-    cleaned = _clean_json_values(
-        data,
-        stats,
-        protected,
-        evidence,
-        preserve_fhir_refs=is_fhir,
-        ref_types=ref_types,
-    )
-    return serialize_json(cleaned), recs
+    if is_document_json(data):
+        psn, offset_days = (
+            link_map[(parsed.rel_posix, "doc")]
+            if link_map is not None and (parsed.rel_posix, "doc") in link_map
+            else (None, 0)
+        )
+        prot = write_json_slot_psn(data, _slot_value(psn), allow_name_fallback=psn is not None)
+        if prot is not None:
+            protected.add(prot)
+        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": psn})
+        stats.records_processed += 1
+        if psn is not None:
+            stats.records_linked += 1
+        cleaned = _clean_json_values(
+            data,
+            stats,
+            protected,
+            evidence,
+            eff_policy,
+            offset_days,
+            date_order,
+            preserve_fhir_refs=False,
+        )
+        return serialize_json(cleaned), recs
+
+    # Multi-record JSON: each record item gets its own cluster PSN and per-patient date shift
+    orig_top_keys = list(data.keys())
+    cleaned_top_keys, key_clean_count = clean_dict_keys(orig_top_keys, evidence)
+    stats.identifiers_detected += key_clean_count
+    top_key_map = dict(zip(orig_top_keys, cleaned_top_keys))
+
+    cleaned_root: dict[str, Any] = {}
+    for key, val in data.items():
+        out_key = top_key_map[key]
+        if isinstance(val, list) and val and all(isinstance(item, dict) for item in val):
+            # Never emit a raw PII key into a records.jsonl pointer (SPEC sec 6 / D5)
+            escaped_key = json_pointer_escape(str(out_key))
+            out_items: list[Any] = []
+            for idx, item in enumerate(val):
+                raw_loc = f"/{key}/{idx}"
+                psn, offset_days = (
+                    link_map[(parsed.rel_posix, raw_loc)]
+                    if link_map is not None and (parsed.rel_posix, raw_loc) in link_map
+                    else (None, 0)
+                )
+                item_prot: set[tuple[int, str]] = set()
+                prot = write_json_slot_psn(item, _slot_value(psn), allow_name_fallback=psn is not None)
+                if prot is not None:
+                    item_prot.add(prot)
+                cleaned_item = _clean_json_values(
+                    item,
+                    stats,
+                    item_prot,
+                    evidence,
+                    eff_policy,
+                    offset_days,
+                    date_order,
+                    preserve_fhir_refs=False,
+                    parent_key=key,
+                )
+                out_items.append(cleaned_item)
+                recs.append(
+                    {
+                        "file": f"sanitized/{parsed.rel_posix}",
+                        "loc": f"/{escaped_key}/{idx}",
+                        "patient": psn,
+                    }
+                )
+                stats.records_processed += 1
+                if psn is not None:
+                    stats.records_linked += 1
+            cleaned_root[out_key] = out_items
+        else:
+            # Not a record list (e.g. an index or export metadata): no patient, so no date offset
+            cleaned_root[out_key] = _clean_json_values(
+                val,
+                stats,
+                set(),
+                evidence,
+                eff_policy,
+                0,
+                date_order,
+                preserve_fhir_refs=False,
+                parent_key=key,
+            )
+
+    return serialize_json(cleaned_root), recs
 
 
 def _process_text(
@@ -470,18 +947,19 @@ def _process_text(
     make_psn: Any,
     stats: PipelineStats,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Process one plain-text file preserving line count. O(len(text))."""
+    """Process one plain-text file preserving line count, PSN placement, R12 shifts, and R13 QIs."""
     assert parsed.text is not None
     text = parsed.text
+    psn = stats.active_psn
     span = find_text_slot_span(text)
 
     if span is not None:
-        start, end, raw_val = span
-        psn = make_psn(normalise_slot_value(raw_val))
-        sanitized_text = clean_text(text[:start], stats) + psn + clean_text(text[end:], stats)
+        start, end, _ = span
+        sanitized_text = clean_text(text[:start], stats) + _slot_value(psn) + clean_text(text[end:], stats)
     else:
-        psn = None
         sanitized_text = clean_text(text, stats)
+        if psn is not None:
+            sanitized_text = inject_psn_into_text(sanitized_text, psn)
 
     rec = {"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": psn}
     stats.records_processed += 1
@@ -491,22 +969,19 @@ def _process_text(
 
 
 def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> PipelineResult:
-    """Run the two-pass firewall pipeline on inp and write outputs into out.
+    """Run the two-pass firewall pipeline: Pass 1 evidence + R10 clustering -> Pass 2 R5-R13 export.
 
-    Pass 1 harvests name tokens and MRN cores only (never keeping file contents).
-    Pass 2 computes collision-free renames and exports sanitized files, records, and report.
-    Complexity: O(total input bytes).
+    Complexity: O(total input bytes + R * alpha(R)).
     """
     validate_policy(policy)
     t0 = time.monotonic()
     san_dir = out / "sanitized"
     san_dir.mkdir(parents=True, exist_ok=True)
 
-    def make_psn(norm_value: str) -> str:
-        return pseudonym(slot_patient_key(norm_value), secret)
-
-    stats = PipelineStats()
+    stats = PipelineStats(policy=policy)
     evidence = ChannelEvidence()
+    record_evidences: list[RecordEvidence] = []
+    next_record_id = 0
     quarantined_map: dict[str, tuple[str, str]] = {}
     sanitizable_paths: list[tuple[Path, str, str]] = []
 
@@ -516,7 +991,7 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
             key=lambda p: p.relative_to(inp).as_posix(),
         )
 
-        # Pass 1: validate files and harvest run-time token/MRN evidence
+        # Pass 1: validate files and harvest channel + record linkage evidence
         for path in input_files:
             rel_posix = path.relative_to(inp).as_posix()
             sha256_hex, parsed, reason = read_and_parse(path, rel_posix)
@@ -524,11 +999,44 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
                 quarantined_map[rel_posix] = (sha256_hex, reason or "quarantined")
                 continue
             try:
-                _harvest_parsed_evidence(parsed, evidence)
+                file_recs, next_record_id = _harvest_parsed_evidence(parsed, evidence, next_record_id)
             except (ValueError, UnicodeError, RecursionError):
                 quarantined_map[rel_posix] = (sha256_hex, "processing_error")
                 continue
+            record_evidences.extend(file_recs)
             sanitizable_paths.append((path, rel_posix, sha256_hex))
+
+        # Cluster records across files/hospitals/scripts and cache keyed PSN + date offset
+        linkage_res = link_records(record_evidences)
+        psn_cache: dict[str, str] = {}
+        offset_cache: dict[str, int] = {}
+        link_map: dict[tuple[str, str], tuple[str | None, int]] = {}
+        for rec in record_evidences:
+            ck = linkage_res.canonical_keys.get(rec.record_id)
+            if ck is not None:
+                psn = psn_cache.get(ck)
+                if psn is None:
+                    psn = pseudonym(ck, secret)
+                    psn_cache[ck] = psn
+                offset = offset_cache.get(ck)
+                if offset is None:
+                    offset = date_shift_days(
+                        ck,
+                        secret,
+                        policy.date_shift_max_days,
+                        policy.date_shift_min_abs_days,
+                    )
+                    offset_cache[ck] = offset
+                link_map[(rec.input_rel, rec.loc)] = (psn, offset)
+            else:
+                internal_key = f"{rec.input_rel}|{rec.loc}"
+                offset = date_shift_days(
+                    internal_key,
+                    secret,
+                    policy.date_shift_max_days,
+                    policy.date_shift_min_abs_days,
+                )
+                link_map[(rec.input_rel, rec.loc)] = (None, offset)
 
         rename_map = build_output_rename_map([rel for _, rel, _ in sanitizable_paths], evidence)
         pass2_lookup = {rel: (path, sha256_hex) for path, rel, sha256_hex in sanitizable_paths}
@@ -536,7 +1044,10 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
         file_entries: list[dict[str, Any]] = []
         all_records: list[dict[str, Any]] = []
 
-        # Pass 2: clean content + hidden channels in deterministic sorted order
+        def _make_psn_unused(_norm: str) -> str:
+            return ""
+
+        # Pass 2: clean content + channels, shift dates, generalise QIs, and export
         for path in input_files:
             rel_posix = path.relative_to(inp).as_posix()
             if rel_posix in quarantined_map:
@@ -562,11 +1073,30 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
             out_rel_posix = rename_map[rel_posix]
             try:
                 if parsed.kind == "csv":
-                    content, file_recs = _process_csv(parsed, make_psn, stats, evidence)
+                    content, file_recs = _process_csv(
+                        parsed,
+                        _make_psn_unused,
+                        stats,
+                        evidence,
+                        link_map=link_map,
+                        policy=policy,
+                    )
                 elif parsed.kind in ("json", "fhir"):
-                    content, file_recs = _process_json(parsed, make_psn, stats, evidence)
+                    content, file_recs = _process_json(
+                        parsed,
+                        _make_psn_unused,
+                        stats,
+                        evidence,
+                        link_map=link_map,
+                        policy=policy,
+                    )
                 else:
-                    content, file_recs = _process_text(parsed, make_psn, stats)
+                    assert parsed.text is not None
+                    psn, offset_days = link_map.get((rel_posix, "doc"), (None, 0))
+                    stats.active_psn = psn
+                    stats.active_offset = offset_days
+                    stats.active_date_order = infer_date_order([parsed.text])
+                    content, file_recs = _process_text(parsed, _make_psn_unused, stats)
             except (ValueError, UnicodeError, RecursionError):
                 file_entries.append(
                     {

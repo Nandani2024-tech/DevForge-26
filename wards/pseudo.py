@@ -13,14 +13,6 @@ def hmac_sha256(key: bytes, msg: bytes) -> bytes:
     return hmac.new(key, msg, hashlib.sha256).digest()
 
 
-def slot_patient_key(normalised_slot_value: str) -> str:
-    """Build the temporary spike key from a normalised ID-slot value.
-
-    Task 3 replaces this with the canonical cross-record cluster key.
-    """
-    return f"slot:{normalised_slot_value}"
-
-
 def pseudonym(patient_key: str, secret: bytes) -> str:
     """Derive a stable, non-reversible PSN-XXXXXX identifier via HMAC-SHA256."""
     digest = hmac_sha256(secret, patient_key.encode("utf-8"))

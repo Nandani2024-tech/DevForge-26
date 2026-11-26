@@ -6,7 +6,7 @@ import unicodedata
 from collections import Counter
 from typing import Any
 
-from wards.config import METADATA_PATH_KEY_TOKENS, NON_NAME_WORDS
+from wards.config import AGE_LABEL_WORDS, METADATA_PATH_KEY_TOKENS, NON_NAME_WORDS
 from wards.patterns import classify_value_shape
 
 # Generic meaning vocabulary per semantic category (never dev-specific column sets)
@@ -57,9 +57,6 @@ _PRESERVE_EXACT_TOKENS = frozenset(
         "sex",
         "ling",
         "लिंग",
-        "age",
-        "umar",
-        "आयु",
         "collected",
         "reported",
         "registered",
@@ -139,6 +136,7 @@ _DIRECT_ID_TOKENS = frozenset({"uhid", "mrn"})
 _PATIENT_ID_PREFIXES = frozenset({"patient", "pt", "reg", "registration", "ipd", "opd", "adm", "admission", "cr"})
 _ID_SUFFIXES = frozenset({"id", "ref", "no", "num", "number", "code", "सं", "संख्या", "आईडी"})
 _DATE_TOKENS = frozenset({"date", "dt", "tithi", "तारीख"})
+_AGE_TOKENS = frozenset(AGE_LABEL_WORDS)
 
 _FHIR_CODE_CONTAINERS = frozenset({"coding", "code", "type", "clinicalstatus", "verificationstatus", "qualification", "relationship"})
 _MAP_ID_TOKENS = frozenset({"uhid", "mrn", "id", "ref", "phone", "mobile", "aadhaar", "aadhar", "abha", "pan"})
@@ -246,6 +244,8 @@ def classify_header_tokens(name: str) -> str | None:
 
     if tok_set & _FREE_TEXT_TOKENS:
         return "FREE_TEXT"
+    if tok_set & _AGE_TOKENS:
+        return "AGE"
     if tok_set & _PRESERVE_EXACT_TOKENS or (tok_set & _DATE_TOKENS):
         return "PRESERVE_EXACT"
     return None

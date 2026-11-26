@@ -16,6 +16,10 @@ from wards.ingest import decode_bytes, is_json_content, json_pointer_unescape
 
 
 def _compare_json_shape(inp_val: Any, san_val: Any, path: str = "$") -> None:
+    if path.endswith(".age") and isinstance(inp_val, int) and isinstance(san_val, str):
+        # SCORING.md sec 5: declared generalisable age fields band int -> str ("45-49", "85+")
+        assert ("-" in san_val or san_val.endswith("+")), f"invalid age band at {path}: {san_val}"
+        return
     assert type(inp_val) is type(san_val), f"type mismatch at {path}: {type(inp_val)} vs {type(san_val)}"
     if isinstance(inp_val, dict):
         assert len(inp_val) == len(san_val), f"key count mismatch at {path}"

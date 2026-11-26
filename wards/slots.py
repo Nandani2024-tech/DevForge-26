@@ -6,6 +6,8 @@ import unicodedata
 from collections import deque
 from typing import Any, Callable
 
+from wards.config import PLACEHOLDERS
+
 # Generic vocabulary of ID-meaning tokens (no dev-specific header sets)
 _DIRECT_PATIENT_ID_TOKENS = frozenset({"uhid", "mrn", "uid"})
 _PATIENT_NOUN_TOKENS = frozenset({"patient", "pt", "रोगी", "मरीज़", "मरीज"})
@@ -101,20 +103,32 @@ def _key_tokens(key: str) -> list[str]:
     return [tok for tok in cleaned.split("_") if tok]
 
 
+def _names_non_patient_thing(tok_set: set[str]) -> bool:
+    """True if key tokens name a non-patient thing (visit, bill, sample...) and no patient ID."""
+    if not tok_set & _NON_PATIENT_TOKENS:
+        return False
+    # Allow explicit patient-ID phrases even when combined with other words
+    has_patient_id = bool(
+        (tok_set & _DIRECT_PATIENT_ID_TOKENS)
+        or ((tok_set & _PATIENT_NOUN_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS))
+    )
+    return not has_patient_id
+
+
+def is_non_patient_id_key(key: str) -> bool:
+    """True if a header/key names a non-patient identifier, so its values are not patient
+    evidence (R10). O(len(key))."""
+    return _names_non_patient_thing(set(_key_tokens(key)))
+
+
 def _key_priority(key: str) -> int:
     """Return 1 for primary patient-ID meaning, 2 for secondary ID, -1 for excluded, 0 neutral."""
     tokens = _key_tokens(key)
     if not tokens:
         return -1
     tok_set = set(tokens)
-    if tok_set & _NON_PATIENT_TOKENS:
-        # Allow explicit patient-ID phrases even when combined with other words
-        has_patient_id = bool(
-            (tok_set & _DIRECT_PATIENT_ID_TOKENS)
-            or ((tok_set & _PATIENT_NOUN_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS))
-        )
-        if not has_patient_id:
-            return -1
+    if _names_non_patient_thing(tok_set):
+        return -1
     if tok_set & _DIRECT_PATIENT_ID_TOKENS:
         return 1
     if (tok_set & _PATIENT_NOUN_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS):
@@ -196,6 +210,25 @@ def find_csv_slot(header: list[str], row: list[str], preferred_col: int | None =
     return best_secondary if best_secondary is not None else best_shape
 
 
+def find_csv_slot_or_fallback(
+    header: list[str],
+    row: list[str],
+    col_types: list[str],
+    preferred_col: int | None = None,
+    *,
+    allow_name_fallback: bool = False,
+) -> int | None:
+    """Locate CSV patient slot index, falling back to PATIENT_NAME column when linked without ID."""
+    found = find_csv_slot(header, row, preferred_col=preferred_col)
+    if found is not None:
+        return found[0]
+    if allow_name_fallback:
+        for idx, cell in enumerate(row):
+            if idx < len(col_types) and col_types[idx] == "PATIENT_NAME" and cell.strip():
+                return idx
+    return None
+
+
 def _find_json_slot_target(obj: dict[str, Any]) -> tuple[dict[str, Any], str, str] | None:
     """Find the best string-valued patient-ID slot inside a JSON record dict via BFS."""
     best_secondary: tuple[dict[str, Any], str, str] | None = None
@@ -248,29 +281,57 @@ def is_document_json(data: Any) -> bool:
     return False
 
 
-def replace_json_slot(obj: Any, make_psn: Callable[[str], str]) -> tuple[str | None, tuple[int, str] | None]:
-    """Find and replace the patient-ID slot in a JSON record dict in-place.
+def _find_json_name_fallback(obj: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """Find a person-name leaf in a JSON record dict via BFS when no ID slot exists. O(nodes)."""
+    queue: deque[dict[str, Any]] = deque([obj])
+    while queue:
+        cur = queue.popleft()
+        for k, v in cur.items():
+            if isinstance(v, str) and v.strip():
+                toks = set(_key_tokens(k))
+                if toks & frozenset({"name", "naam", "नाम"}) or k == "patient":
+                    return cur, k
+            elif isinstance(v, dict):
+                queue.append(v)
+    return None
 
-    Returns (psn_or_none, protected_field_ref_or_none) so subsequent cleaners do not alter PSN.
+
+def write_json_slot_psn(
+    obj: Any,
+    value: str,
+    *,
+    allow_name_fallback: bool = False,
+) -> tuple[int, str] | None:
+    """Write the PSN (or, for a null patient, the ID placeholder) into the JSON patient-ID slot.
+
+    The name-leaf fallback is only for a linked record (value is a PSN). O(nodes).
     """
     if not isinstance(obj, dict):
-        return None, None
+        return None
     target = _find_json_slot_target(obj)
-    if target is None:
-        return None, None
-    container, key, raw_val = target
-    psn = make_psn(normalise_slot_value(raw_val))
-    container[key] = psn
-    return psn, (id(container), key)
+    if target is not None:
+        container, key, _ = target
+        container[key] = value
+        return id(container), key
+    if allow_name_fallback:
+        fb = _find_json_name_fallback(obj)
+        if fb is not None:
+            container, key = fb
+            container[key] = value
+            return id(container), key
+    return None
 
 
-def replace_fhir_slot(bundle: Any, make_psn: Callable[[str], str]) -> tuple[str | None, tuple[int, str] | None]:
-    """Replace Patient.identifier[].value in a FHIR Bundle with the pseudonym."""
+def write_fhir_slot_psn(bundle: Any, value: str, *, allow_name_fallback: bool) -> tuple[int, str] | None:
+    """Write the PSN (or the ID placeholder for a null patient) into Patient.identifier[].value.
+
+    Patient.name[0].text is the fallback slot only for a linked record (value is a PSN).
+    """
     if not isinstance(bundle, dict):
-        return None, None
+        return None
     entries = bundle.get("entry")
     if not isinstance(entries, list):
-        return None, None
+        return None
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -278,14 +339,30 @@ def replace_fhir_slot(bundle: Any, make_psn: Callable[[str], str]) -> tuple[str 
         if not isinstance(res, dict) or res.get("resourceType") != "Patient":
             continue
         identifiers = res.get("identifier")
-        if not isinstance(identifiers, list):
-            continue
-        for ident in identifiers:
-            if isinstance(ident, dict) and isinstance(ident.get("value"), str) and ident["value"].strip():
-                psn = make_psn(normalise_slot_value(ident["value"]))
-                ident["value"] = psn
-                return psn, (id(ident), "value")
-    return None, None
+        if isinstance(identifiers, list):
+            for ident in identifiers:
+                if isinstance(ident, dict) and isinstance(ident.get("value"), str) and ident["value"].strip():
+                    ident["value"] = value
+                    return id(ident), "value"
+        names = res.get("name")
+        if allow_name_fallback and isinstance(names, list) and names and isinstance(names[0], dict):
+            if isinstance(names[0].get("text"), str) and names[0]["text"].strip():
+                names[0]["text"] = value
+                return id(names[0]), "text"
+    return None
+
+
+# Placeholder kinds, in preference order, that may carry the PSN of a linked text document.
+_PSN_TEXT_SLOT_KINDS = ("PATIENT_NAME", "PHONE", "MRN")
+
+
+def inject_psn_into_text(cleaned_text: str, psn: str) -> str:
+    """Place PSN into the first person/phone placeholder of a linked free-text document. O(len(text))."""
+    for kind in _PSN_TEXT_SLOT_KINDS:
+        placeholder = PLACEHOLDERS[kind]
+        if placeholder in cleaned_text:
+            return cleaned_text.replace(placeholder, psn, 1)
+    return cleaned_text
 
 
 def find_text_slot_span(text: str) -> tuple[int, int, str] | None:
