@@ -1,0 +1,12 @@
+# MISTAKES (read before every task)
+date | source | R-id | symptom | root cause | rule to prevent it | seen
+2026-11-26 14:00 | domain-primer | R11 | (preventive) | unkeyed hash used as pseudonym is invertible (A6) and stable across releases (A7) | pseudonyms only via HMAC-SHA256(RAKSHA_SECRET, canonical cluster key) | 1
+2026-11-26 14:00 | domain-primer | R12 | (preventive) | one global date offset is recovered from two known visits (A5) | shift = per-patient HMAC offset, the same for all dates of that patient, format preserved | 1
+2026-11-26 14:00 | domain-primer | R10 | (preventive) | transitive union of fuzzy name matches merges homonyms | link only on high-confidence edges, reject clusters with conflicting strong IDs/DOB, else null | 1
+2026-11-26 14:00 | domain-primer | R6 | (preventive) | Verhoeff checksum treated as required; 21% of dev Aadhaar values fail it | 12-digit shape in ID context = Aadhaar; checksum only raises confidence | 1
+2026-11-26 14:00 | domain-primer | R22 | (preventive) | name/header lists copied from practice data fail the unseen-format round | harvest names at run time from the input's own structured columns + context rules; no dev strings in code | 1
+2026-11-26 14:40 | prior-art-scan | R4 | (preventive) | fhir.resources 8.3.0 has no R4 package and its R4B Bundle accepts an invalid Bundle.type | never treat a fhir.resources parse as full validation; add own value-set + reference-resolution checks | 1
+2026-11-26 14:40 | prior-art-scan | R7 | (preventive) | raw ITRANS/IAST output keeps the inherent schwa (rAjesha) so keys never match Latin spellings | apply final + medial schwa deletion before comparing names across scripts | 1
+2026-11-26 14:40 | prior-art-scan | R20 | (preventive) | psutil peak_wset exists only on Windows | measure peak RSS by sampling rss of the process + children every 50 ms on all OSes | 1
+2026-11-26 15:00 | prior-art-scan | R20 | (preventive) | rapidfuzz 3.14.6 / jellyfish 1.3.0 / regex require Python >= 3.11, evaluator version unknown | code must run on Python 3.10-3.12: no tomllib, no ExceptionGroup/except*; pin only releases with cp310 + cp312 wheels (rapidfuzz 3.14.5, jellyfish 1.2.1); test setup in clean 3.10 and 3.12 venvs before submitting | 2
+2026-11-26 14:40 | prior-art-scan | R23 | (preventive) | test-only libraries (fhir.resources, Faker, pytest) leaking into runtime requirements slow setup and widen the audit surface | runtime deps in requirements.txt, test deps in requirements-dev.txt | 1

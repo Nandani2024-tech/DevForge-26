@@ -59,6 +59,9 @@
       "Bash(git commit --no-verify*)",
       "Bash(git commit * --no-verify*)",
       "Bash(git commit -n *)"
+    ],
+    "additionalDirectories": [
+      "../Secret-Wards-ToolKit"
     ]
   }
 }
