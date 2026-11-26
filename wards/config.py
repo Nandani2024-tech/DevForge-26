@@ -30,6 +30,7 @@ PLACEHOLDERS: dict[str, str] = {
     "LANDMARK": "[LANDMARK]",
     "PIN": "[PIN]",
     "ADDRESS": "[ADDRESS]",
+    "AGE": "[AGE]",
 }
 
 # Filename-safe placeholders (no / \ : * ? " < > | or brackets)
@@ -628,7 +629,9 @@ ABHA_DIGITS = 14
 # R13 PIN generalisation: India Post PIN codes have 6 digits; dropped digits become this mark.
 PIN_DIGITS = 6
 PIN_MASK_CHAR = "*"
-# Highest number read as an age in years (oldest verified human lifespan is 122).
+# Valid ages in years: below MIN_VALID_AGE or above MAX_VALID_AGE (oldest verified human
+# lifespan is 122) a value is not a real age, so it is replaced by the age placeholder, never banded.
+MIN_VALID_AGE = 0
 MAX_VALID_AGE = 125
 
 # R13 field-meaning words in English, Hindi (Devanagari) and Hinglish. Sources: English and

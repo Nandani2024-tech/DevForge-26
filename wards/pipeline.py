@@ -1,9 +1,12 @@
 """End-to-end two-pass firewall pipeline: Pass 1 evidence + R10 linkage -> R5-R13 export."""
 from __future__ import annotations
 
+import json
+import re
 import time
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from wards.channels import (
@@ -31,7 +34,15 @@ from wards.config import (
     Policy,
     validate_policy,
 )
-from wards.dates import DATE_ORDER_DMY, infer_date_order, parse_dob_iso, shift_dates_in_text
+from wards.dates import (
+    DATE_ORDER_DMY,
+    count_date_order_votes,
+    date_order_evidence,
+    infer_date_order,
+    parse_dob_iso,
+    resolve_date_order,
+    shift_dates_in_text,
+)
 from wards.generalise import (
     generalise_address_field,
     generalise_age_field,
@@ -66,7 +77,7 @@ from wards.writers import (
 )
 
 # Structured PII categories redacted by placeholder (excludes DOB/PIN handled by R12/R13)
-_STRUCTURED_PII_KINDS = frozenset(PLACEHOLDERS) - frozenset({"DOB", "PIN", "ADDRESS"})
+_STRUCTURED_PII_KINDS = frozenset(PLACEHOLDERS) - frozenset({"DOB", "PIN", "ADDRESS", "AGE"})
 _STRONG_ID_KINDS = frozenset(
     {"MRN", "AADHAAR", "ABHA", "ABHA_ADDRESS", "PHONE", "PAN", "INSURANCE", "EMAIL"}
 )
@@ -968,6 +979,61 @@ def _process_text(
     return sanitized_text, [rec]
 
 
+_DIGIT_RUN_RE = re.compile(r"\d+")
+
+
+def _source_family_key(rel_posix: str) -> str:
+    """Files exported from one template: same folder and same name once digit runs are masked
+    (e.g. a numbered series). Internal grouping only, never written out. O(len(rel_posix))."""
+    rel = PurePosixPath(rel_posix)
+    return f"{rel.parent.as_posix()}/{_DIGIT_RUN_RE.sub('#', rel.name)}"
+
+
+def _record_text(parsed: ParsedInput, loc: str) -> str:
+    """The input text of one record (table row, JSON record, or whole document), for date
+    evidence only. Chosen by which ParsedInput field holds the content. O(record size)."""
+    if parsed.rows is not None:
+        return " | ".join(parsed.rows[int(loc.split(":", 1)[1]) + 1])
+    if parsed.text is not None:
+        return parsed.text
+    node = parsed.data
+    if loc != "doc":
+        key, idx = loc[1:].rsplit("/", 1)
+        node = node[key][int(idx)]
+    return json.dumps(node, ensure_ascii=False)
+
+
+def _decide_text_date_orders(
+    text_votes: dict[str, tuple[tuple[int, int], list[tuple[str, str]], int]],
+    record_dates: dict[int, list[str]],
+    canonical_keys: dict[int, str | None],
+) -> dict[str, str]:
+    """R12 date order per text file: its own dates first; if they prove nothing, the certain
+    dates of records linked to the same patient (which reading of an ambiguous date they
+    contain); then the other files of the same export family; day-first only without evidence.
+
+    Complexity: O(R + total dates) with dict/set lookups.
+    """
+    cluster_dates: dict[str, set[str]] = defaultdict(set)
+    for rid in sorted(record_dates):
+        ck = canonical_keys.get(rid)
+        if ck is not None:
+            cluster_dates[ck].update(record_dates[rid])
+    family_votes: dict[str, Counter[str]] = defaultdict(Counter)
+    for rel, (own, _, _) in sorted(text_votes.items()):
+        family_votes[_source_family_key(rel)].update({"dmy": own[0], "mdy": own[1]})
+
+    orders: dict[str, str] = {}
+    for rel, (own, readings, rid) in sorted(text_votes.items()):
+        ck = canonical_keys.get(rid)
+        known = cluster_dates.get(ck, set()) if ck is not None else set()
+        linked = (sum(d in known for d, _ in readings), sum(m in known for _, m in readings))
+        fam = family_votes[_source_family_key(rel)]
+        family = (fam["dmy"] - own[0], fam["mdy"] - own[1])
+        orders[rel] = resolve_date_order(own, linked, family)
+    return orders
+
+
 def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> PipelineResult:
     """Run the two-pass firewall pipeline: Pass 1 evidence + R10 clustering -> Pass 2 R5-R13 export.
 
@@ -981,6 +1047,8 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
     stats = PipelineStats(policy=policy)
     evidence = ChannelEvidence()
     record_evidences: list[RecordEvidence] = []
+    record_dates: dict[int, list[str]] = {}
+    text_votes: dict[str, tuple[tuple[int, int], list[tuple[str, str]], int]] = {}
     next_record_id = 0
     quarantined_map: dict[str, tuple[str, str]] = {}
     sanitizable_paths: list[tuple[Path, str, str]] = []
@@ -1004,10 +1072,16 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
                 quarantined_map[rel_posix] = (sha256_hex, "processing_error")
                 continue
             record_evidences.extend(file_recs)
+            for rec in file_recs:
+                certain, ambiguous = date_order_evidence(_record_text(parsed, rec.loc))
+                record_dates[rec.record_id] = certain
+                if parsed.kind == "text":
+                    text_votes[rel_posix] = (count_date_order_votes([parsed.text]), ambiguous, rec.record_id)
             sanitizable_paths.append((path, rel_posix, sha256_hex))
 
         # Cluster records across files/hospitals/scripts and cache keyed PSN + date offset
         linkage_res = link_records(record_evidences)
+        text_date_orders = _decide_text_date_orders(text_votes, record_dates, linkage_res.canonical_keys)
         psn_cache: dict[str, str] = {}
         offset_cache: dict[str, int] = {}
         link_map: dict[tuple[str, str], tuple[str | None, int]] = {}
@@ -1095,7 +1169,7 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
                     psn, offset_days = link_map.get((rel_posix, "doc"), (None, 0))
                     stats.active_psn = psn
                     stats.active_offset = offset_days
-                    stats.active_date_order = infer_date_order([parsed.text])
+                    stats.active_date_order = text_date_orders[rel_posix]
                     content, file_recs = _process_text(parsed, _make_psn_unused, stats)
             except (ValueError, UnicodeError, RecursionError):
                 file_entries.append(

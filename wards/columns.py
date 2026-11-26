@@ -131,6 +131,8 @@ _RELATIVE_TOKENS = frozenset(
     }
 )
 _NAME_TOKENS = frozenset({"name", "naam", "fname", "lname", "नाम"})
+# Public alias: the one name-meaning key vocabulary, reused by wards.slots.
+NAME_KEY_TOKENS = _NAME_TOKENS
 _PERSON_NAME_MODIFIERS = frozenset({"patient", "pt", "first", "last", "full", "given", "family", "local", "मरीज़", "मरीज", "रोगी"})
 _DIRECT_ID_TOKENS = frozenset({"uhid", "mrn"})
 _PATIENT_ID_PREFIXES = frozenset({"patient", "pt", "reg", "registration", "ipd", "opd", "adm", "admission", "cr"})

@@ -6,6 +6,7 @@ import unicodedata
 from collections import deque
 from typing import Any, Callable
 
+from wards.columns import NAME_KEY_TOKENS
 from wards.config import PLACEHOLDERS
 
 # Generic vocabulary of ID-meaning tokens (no dev-specific header sets)
@@ -289,7 +290,7 @@ def _find_json_name_fallback(obj: dict[str, Any]) -> tuple[dict[str, Any], str] 
         for k, v in cur.items():
             if isinstance(v, str) and v.strip():
                 toks = set(_key_tokens(k))
-                if toks & frozenset({"name", "naam", "नाम"}) or k == "patient":
+                if toks & NAME_KEY_TOKENS or k == "patient":
                     return cur, k
             elif isinstance(v, dict):
                 queue.append(v)

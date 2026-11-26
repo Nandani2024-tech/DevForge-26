@@ -77,8 +77,9 @@ _MONTH_DAY_NAME_RE = re.compile(
 )
 
 
-def infer_date_order(samples: Iterable[str]) -> str:
-    """Vote between day-first ('dmy') and month-first ('mdy') numeric dates. O(total chars)."""
+def count_date_order_votes(samples: Iterable[str]) -> tuple[int, int]:
+    """Count numeric dates that prove day-first (first field > 12) or month-first (second field
+    > 12). Returns (dmy_votes, mdy_votes). O(total chars)."""
     dmy_votes = 0
     mdy_votes = 0
     for text in samples:
@@ -93,7 +94,59 @@ def infer_date_order(samples: Iterable[str]) -> str:
                     dmy_votes += 1
                 elif b > _MONTHS_PER_YEAR and 1 <= a <= _MONTHS_PER_YEAR:
                     mdy_votes += 1
-    return DATE_ORDER_MDY if mdy_votes > dmy_votes else DATE_ORDER_DMY
+    return dmy_votes, mdy_votes
+
+
+def infer_date_order(samples: Iterable[str]) -> str:
+    """Vote between day-first ('dmy') and month-first ('mdy') numeric dates. O(total chars)."""
+    return resolve_date_order(count_date_order_votes(samples))
+
+
+def resolve_date_order(*vote_sources: tuple[int, int]) -> str:
+    """First evidence source whose (dmy, mdy) votes differ decides; day-first when none does.
+
+    Sources are passed strongest first (the text's own dates, then linked records, then
+    files of the same export family). O(len(vote_sources)).
+    """
+    for dmy_votes, mdy_votes in vote_sources:
+        if dmy_votes != mdy_votes:
+            return DATE_ORDER_MDY if mdy_votes > dmy_votes else DATE_ORDER_DMY
+    return DATE_ORDER_DMY
+
+
+def _iso_or_none(year: int, month: int, day: int) -> str | None:
+    d = _safe_date(year, month, day)
+    return d.isoformat() if d is not None else None
+
+
+def date_order_evidence(text: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Split the dates of one text into certain ISO dates (ISO form, a field > 12, or a month
+    name with a year) and ambiguous numeric dates as (day-first ISO, month-first ISO) pairs.
+
+    Used to decide the order of an all-ambiguous text from linked records (R12). O(len(text)).
+    """
+    ascii_text = normalise_digits(text) if text else ""
+    certain: list[str] = []
+    ambiguous: list[tuple[str, str]] = []
+    for m in _ISO_DATE_RE.finditer(ascii_text):
+        iso = _iso_or_none(int(m.group("y")), int(m.group("m")), int(m.group("d")))
+        if iso is not None:
+            certain.append(iso)
+    for m in _NUM_4Y_RE.finditer(ascii_text):
+        a, b, year = int(m.group("a")), int(m.group("b")), int(m.group("y"))
+        as_dmy, as_mdy = _iso_or_none(year, b, a), _iso_or_none(year, a, b)
+        if as_dmy is not None and as_mdy is not None and as_dmy != as_mdy:
+            ambiguous.append((as_dmy, as_mdy))
+        elif as_dmy is not None or as_mdy is not None:
+            certain.append(as_dmy or as_mdy or "")
+    for rx in (_DAY_MONTH_NAME_RE, _MONTH_DAY_NAME_RE):
+        for m in rx.finditer(ascii_text):
+            if m.group("y"):
+                mon_num, _ = _MONTH_LOOKUP[m.group("mon").casefold()]
+                iso = _iso_or_none(int(m.group("y")), mon_num, int(m.group("d")))
+                if iso is not None:
+                    certain.append(iso)
+    return certain, ambiguous
 
 
 def _expand_two_digit_year(yy: int) -> int:

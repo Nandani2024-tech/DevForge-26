@@ -25,6 +25,7 @@ from wards.config import (
     RELATIVE_LABELS,
     SUFFIX_HONORIFICS,
 )
+from wards.patterns import PROTECTED_TOKEN_RE
 
 # Token building blocks (horizontal whitespace only so line counts stay unchanged)
 _LATIN_TOK = r"(?:[A-Za-z][A-Za-z'.-]{0,30})"
@@ -50,7 +51,7 @@ _HINGLISH_MKR_ALT = "|".join(re.escape(m) for m in HINGLISH_SUBJECT_MARKERS)
 
 # Protect-mask patterns (R8): run first so medical facts, doctors, and placeholders stay untouched
 _FAST_PROTECT_RE = re.compile(
-    r"\[[A-Z_]+\]|PSN-[0-9A-Z]{6}|"
+    PROTECTED_TOKEN_RE.pattern + "|"
     r"(?i:\b(?:Ward|Bed|Department)[ \t]*(?:\([^)\n\r]+\)|of[ \t]+[A-Za-z]+|\d+)?\b)|\bASHA\b|"
     r"(?i:\b\d+(?:\.\d+)?[ \t]*(?:mg|mcg|ug|gm?|kg|ml|dl|l|iu|units?|mmhg|bpm|meq|mmol|/ul|/dl|/l|%)\b|"
     r"\b\d+-\d+-\d+\b|\b(?:BP|Pulse|Temp|SpO2|RBS|Hb|HbA1c|TLC|WBC|Plt)[ \t:]*\d+(?:[./]\d+)?\b)"

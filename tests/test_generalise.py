@@ -106,3 +106,19 @@ def test_r13_unlabelled_pin_after_district_keeps_prefix(tmp_path: Path) -> None:
     text = (out / "sanitized" / "ds.txt").read_text(encoding="utf-8")
     assert "284731" not in text and "284***" in text
     assert "Zelvanpur" not in text and "Quillabad" in text
+
+
+def test_r13_invalid_age_gets_placeholder_never_a_band() -> None:
+    from wards.config import MAX_VALID_AGE, PLACEHOLDERS
+    from wards.generalise import generalise_age_int
+
+    age_ph = PLACEHOLDERS["AGE"]
+    assert generalise_age_field("-2 वर्ष", 5, 85) == (f"{age_ph} वर्ष", 1)
+    assert generalise_age_field(f"{MAX_VALID_AGE + 1} Y", 5, 85) == (f"{age_ph} Y", 1)
+    assert generalise_age_int(-3, 5, 85) == age_ph
+    assert generalise_age_int(MAX_VALID_AGE + 1, 5, 85) == age_ph
+    # Boundaries stay ages: 0 -> 0-4, MAX_VALID_AGE -> top-code band.
+    assert generalise_age_int(0, 5, 85) == "0-4"
+    assert generalise_age_int(MAX_VALID_AGE, 5, 85) == "85+"
+    out, cnt = generalise_text_qis("Age: -1. Age: 48/F", width=5, top_code=85, prefix_digits=3)
+    assert out == f"Age: {age_ph}. Age: 45-49/F" and cnt == 2

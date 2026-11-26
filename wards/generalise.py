@@ -9,6 +9,7 @@ from wards.config import (
     DISTRICT_MARKER_WORDS,
     LOCATION_LEVEL_TEHSIL,
     MAX_VALID_AGE,
+    MIN_VALID_AGE,
     PIN_DIGITS,
     PIN_LABEL_WORDS,
     PLACEHOLDERS,
@@ -28,11 +29,13 @@ def _alt(words: tuple[str, ...]) -> str:
     return "|".join(re.escape(w).replace(r"\ ", r"[ 	]+") for w in sorted(words, key=lambda w: (-len(w), w)))
 
 
-_STRUCTURED_AGE_NUM_RE = re.compile(r"(?<!\d)(?P<age>\d{1,3})(?!\d)")
+# An optional minus sign counts only when no letter or digit precedes it ("-2", not "48-50").
+_SIGNED_AGE = r"(?:(?<![A-Za-z0-9])(?P<sign>-))?(?<!\d)(?P<age>\d+)(?!\d)"
+_STRUCTURED_AGE_NUM_RE = re.compile(_SIGNED_AGE)
 # "Age: 48", "Age/Sex: 48/F": a number right after an age label.
 _LABELLED_AGE_RE = re.compile(
     rf"(?i){_WORD_EDGE}(?:{_alt(AGE_LABEL_WORDS)})(?:[ 	]*/[ 	]*(?:{_alt(SEX_LABEL_WORDS)}))?"
-    r"[ 	]*:[ 	]*(?P<age>\d{1,3})(?![ 	]*[-/.]\d)"
+    rf"[ 	]*:[ 	]*{_SIGNED_AGE}(?![ 	]*[-/.]\d)"
 )
 # "48/F", "48 Y / M", "52 वर्ष / पुरुष": a number, an optional age unit, then a sex value.
 # Durations ("x 12 yrs"), rates ("78/min") and ratios ("120/80") have no sex value, so they never match.
@@ -63,6 +66,19 @@ def _apply_edits(text: str, edits: list[tuple[int, int, str]]) -> str:
     return "".join(parts)
 
 
+def _signed_age(m: re.Match[str]) -> int:
+    age = int(m.group("age"))
+    return -age if m.group("sign") else age
+
+
+def _age_or_placeholder(age: int, width: int, top_code: int) -> str:
+    """The band containing a valid age, or the age placeholder for a value that is not a real
+    age (R13: a band must contain the true age, so an impossible value is never banded). O(1)."""
+    if not MIN_VALID_AGE <= age <= MAX_VALID_AGE:
+        return PLACEHOLDERS["AGE"]
+    return age_band(age, width=width, top_code=top_code)
+
+
 def generalise_age_field(value: str, width: int, top_code: int) -> tuple[str, int]:
     """Band the age inside a structured age or age/sex string (e.g. '48/F' -> '45-49/F'). O(len(value))."""
     if not value or not value.strip():
@@ -71,16 +87,13 @@ def generalise_age_field(value: str, width: int, top_code: int) -> tuple[str, in
     m = _STRUCTURED_AGE_NUM_RE.search(ascii_val)
     if m is None:
         return value, 0
-    age_num = int(m.group("age"))
-    if age_num > MAX_VALID_AGE:
-        return value, 0
-    band = age_band(age_num, width=width, top_code=top_code)
-    return value[: m.start("age")] + band + value[m.end("age") :], 1
+    start = m.start("sign") if m.group("sign") else m.start("age")
+    return value[:start] + _age_or_placeholder(_signed_age(m), width, top_code) + value[m.end("age") :], 1
 
 
 def generalise_age_int(age: int, width: int, top_code: int) -> str:
-    """Band an integer age value cleanly using policy width and top-code. O(1)."""
-    return age_band(max(0, age), width=width, top_code=top_code)
+    """Band an integer age by policy width and top-code; an invalid age gets the placeholder. O(1)."""
+    return _age_or_placeholder(age, width, top_code)
 
 
 def generalise_pin_str(value: str, prefix_digits: int) -> tuple[str, int]:
@@ -154,13 +167,12 @@ def generalise_text_qis(
 
     for rx in (_LABELLED_AGE_RE, _AGE_SEX_RE):
         for m in rx.finditer(ascii_text):
-            s, e = m.start("age"), m.end("age")
+            sign = m.groupdict().get("sign")
+            s, e = (m.start("sign") if sign else m.start("age")), m.end("age")
             if any(occupied[s:e]):
                 continue
-            age_num = int(m.group("age"))
-            if age_num > MAX_VALID_AGE:
-                continue
-            _claim(s, e, age_band(age_num, width=width, top_code=top_code))
+            age_num = -int(m.group("age")) if sign else int(m.group("age"))
+            _claim(s, e, _age_or_placeholder(age_num, width, top_code))
 
     for m in _PIN_LABEL_RE.finditer(ascii_text):
         _claim(m.start("pin"), m.end("pin"), pin_prefix_mask(m.group("pin"), prefix_digits))

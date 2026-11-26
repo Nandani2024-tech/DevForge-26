@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from pathlib import Path
 
 from wards.config import load_policy
@@ -77,3 +78,42 @@ def test_r12_yearless_date_takes_the_year_of_the_same_text() -> None:
     # 2024 is a leap year: 2024-02-27 -> 2024-02-29, 28 Feb -> 01 Mar.
     out, _ = shift_dates_in_text("Visit 2024-02-27. Review 28 Feb.", 2)
     assert out == "Visit 2024-02-29. Review 01 Mar."
+
+
+def test_r12_ambiguous_text_takes_order_from_linked_record(tmp_path: Path) -> None:
+    # The note's dates are all <= 12 (no own evidence). The same patient's registration row
+    # holds 2026-02-01 in ISO form, which matches the month-first reading of "02/01/2026".
+    inp = tmp_path / "in"
+    out = tmp_path / "out"
+    inp.mkdir()
+    (inp / "reg.csv").write_text("UHID,Admit\nQRV-77120,2026-02-01\n", encoding="utf-8")
+    (inp / "note.txt").write_text(
+        "UHID: QRV-77120\nAdmitted: 02/01/2026\nDischarged: 02/06/2026\n", encoding="utf-8"
+    )
+    run_pipeline(inp, out, b"order-secret", load_policy())
+    note = (out / "sanitized" / "note.txt").read_text(encoding="utf-8")
+    adm = re.search(r"Admitted: (\S+)", note).group(1)
+    dis = re.search(r"Discharged: (\S+)", note).group(1)
+    # Month-first: 1 Feb -> 6 Feb is 5 days; day-first would give 151 days.
+    assert (parse_mdy(dis) - parse_mdy(adm)).days == 5
+
+
+def test_r12_ambiguous_text_takes_order_from_its_export_family(tmp_path: Path) -> None:
+    # Three numbered exports of one template; two prove month-first (second field > 12).
+    inp = tmp_path / "in"
+    out = tmp_path / "out"
+    inp.mkdir()
+    (inp / "slip_0001.txt").write_text("Seen: 03/14/2026\nReview: 03/21/2026\n", encoding="utf-8")
+    (inp / "slip_0002.txt").write_text("Seen: 04/15/2026\n", encoding="utf-8")
+    (inp / "slip_0003.txt").write_text("Seen: 05/01/2026\nReview: 05/09/2026\n", encoding="utf-8")
+    run_pipeline(inp, out, b"family-secret", load_policy())
+    slip = (out / "sanitized" / "slip_0003.txt").read_text(encoding="utf-8")
+    seen = re.search(r"Seen: (\S+)", slip).group(1)
+    review = re.search(r"Review: (\S+)", slip).group(1)
+    # Month-first: 1 May -> 9 May is 8 days; day-first (5 Jan -> 5 Sep) would be 243 days.
+    assert (parse_mdy(review) - parse_mdy(seen)).days == 8
+
+
+def parse_mdy(value: str) -> dt.date:
+    m, d, y = (int(x) for x in value.split("/"))
+    return dt.date(y, m, d)
