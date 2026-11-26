@@ -36,8 +36,6 @@ _NON_PATIENT_TOKENS = frozenset(
         "bill",
         "sample",
         "order",
-        "trip",
-        "ticket",
         "doctor",
         "facility",
         "package",
@@ -110,7 +108,7 @@ def _key_priority(key: str) -> int:
         return -1
     tok_set = set(tokens)
     if tok_set & _NON_PATIENT_TOKENS:
-        # Allow explicit patient-ID phrases even if a modifier overlaps (e.g. patient_ref)
+        # Allow explicit patient-ID phrases even when combined with other words
         has_patient_id = bool(
             (tok_set & _DIRECT_PATIENT_ID_TOKENS)
             or ((tok_set & _PATIENT_NOUN_TOKENS) and (tok_set & _ID_SUFFIX_TOKENS))
@@ -125,7 +123,7 @@ def _key_priority(key: str) -> int:
         return 1
     if (tok_set & _DEVA_ID_PREFIXES) and (tok_set & _ID_SUFFIX_TOKENS):
         return 1
-    # Bare "id" without a patient/record qualifier is ambiguous (e.g. ticket or item id)
+    # Bare "id" without a patient/record qualifier is ambiguous
     if tok_set == {"id"}:
         return -1
     if tok_set & _SECONDARY_ID_TOKENS:

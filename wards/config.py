@@ -9,6 +9,28 @@ REPORT_SCHEMA = "raksha-report/1"
 SUPPORTED_EXTENSIONS = (".csv", ".tsv", ".json", ".txt")
 RSS_SAMPLE_INTERVAL_SEC = 0.05
 DEFAULT_POLICY_PATH = Path(__file__).resolve().parent.parent / "config" / "policy.yaml"
+NUMERIC_REDACTION_SENTINEL = 0
+
+PLACEHOLDERS: dict[str, str] = {
+    "PATIENT_NAME": "[PATIENT_NAME]",
+    "RELATIVE": "[RELATIVE]",
+    "PHONE": "[PHONE]",
+    "EMAIL": "[EMAIL]",
+    "AADHAAR": "[AADHAAR]",
+    "AADHAAR_MASKED": "[AADHAAR_MASKED]",
+    "ABHA": "[ABHA]",
+    "ABHA_ADDRESS": "[ABHA_ADDRESS]",
+    "PAN": "[PAN]",
+    "MRN": "[MRN]",
+    "INSURANCE": "[INSURANCE]",
+    "DOB": "[DOB]",
+    "VILLAGE": "[VILLAGE]",
+    "LOCALITY": "[LOCALITY]",
+    "HOUSE": "[HOUSE]",
+    "LANDMARK": "[LANDMARK]",
+    "PIN": "[PIN]",
+    "ADDRESS": "[ADDRESS]",
+}
 
 REQUIRED_POLICY_KEYS = (
     "age_band_years",

@@ -1,14 +1,15 @@
-"""End-to-end scaffold pipeline: ingest -> slot PSN + baseline clean -> export & report."""
+"""End-to-end firewall pipeline: ingest -> slot PSN + R5/R6 redaction -> export & report."""
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from wards.config import REPORT_SCHEMA, Policy, validate_policy
+from wards.config import NUMERIC_REDACTION_SENTINEL, PLACEHOLDERS, REPORT_SCHEMA, Policy, validate_policy
 from wards.ingest import ParsedInput, json_pointer_escape, read_and_parse
+from wards.patterns import redact_identifiers
+from wards.columns import build_fhir_fullurl_map, classify_csv_columns, classify_json_key
 from wards.pseudo import pseudonym, slot_patient_key
 from wards.resources import MemorySampler
 from wards.slots import (
@@ -28,14 +29,8 @@ from wards.writers import (
     write_sanitized_text,
 )
 
-# Baseline regexes carried from starter (horizontal whitespace only so line counts stay exact)
-_BASELINE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("PHONE", re.compile(r"(?<!\d)(?:\+?91[ \t-]?)?[6-9]\d{4}[ \t-]?\d{5}(?!\d)")),
-    ("AADHAAR", re.compile(r"(?<!\d)\d{4}[ \t-]?\d{4}[ \t-]?\d{4}(?!\d)")),
-    ("EMAIL", re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")),
-    ("PAN", re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b")),
-    ("NAME", re.compile(r"(?i)(?<=name:)[ \t]*[^\n,;|]+")),
-)
+# Structured PII categories whose non-empty cells/leaves are replaced by placeholder constants
+_STRUCTURED_PII_KINDS = frozenset(PLACEHOLDERS)
 
 
 @dataclass
@@ -59,12 +54,10 @@ class PipelineResult:
 
 
 def clean_text(text: str, stats: PipelineStats) -> str:
-    """Replace baseline identifiers in text while preserving line count. O(len(text))."""
-    for kind, rx in _BASELINE_PATTERNS:
-        repl = f"[{kind}]" if kind != "NAME" else " [NAME]"
-        text, n = rx.subn(repl, text)
-        stats.identifiers_detected += n
-    return text
+    """Replace R6 identifiers and phones in free text while preserving line count. O(len(text))."""
+    cleaned, count = redact_identifiers(text)
+    stats.identifiers_detected += count
+    return cleaned
 
 
 def _clean_json_values(
@@ -72,23 +65,91 @@ def _clean_json_values(
     stats: PipelineStats,
     protected: set[tuple[int, str]],
     preserve_fhir_refs: bool = False,
+    parent_key: str | None = None,
+    resource_type: str | None = None,
+    ref_types: dict[str, str] | None = None,
 ) -> Any:
-    """Clean string leaves in JSON while preserving keys, structure, value types, and PSN slots."""
+    """Clean JSON leaves by key semantics and R6 patterns while keeping structure and value types.
+
+    Complexity: O(number of JSON nodes + total string bytes).
+    """
     if isinstance(value, str):
+        if not value.strip():
+            return value
+        semantic = classify_json_key(parent_key, parent_key or "", resource_type) if parent_key else "FREE_TEXT"
+        if semantic in _STRUCTURED_PII_KINDS:
+            stats.identifiers_detected += 1
+            return PLACEHOLDERS[semantic]
+        if semantic == "PRESERVE_EXACT":
+            return value
         return clean_text(value, stats)
+
     if isinstance(value, list):
-        return [_clean_json_values(item, stats, protected, preserve_fhir_refs) for item in value]
+        return [
+            _clean_json_values(
+                item,
+                stats,
+                protected,
+                preserve_fhir_refs=preserve_fhir_refs,
+                parent_key=parent_key,
+                resource_type=resource_type,
+                ref_types=ref_types,
+            )
+            for item in value
+        ]
+
     if isinstance(value, dict):
         container_id = id(value)
+        cur_res_type = (
+            value.get("resourceType")
+            if preserve_fhir_refs and isinstance(value.get("resourceType"), str)
+            else resource_type
+        )
+        ref_target_type: str | None = None
+        if preserve_fhir_refs and ref_types is not None and isinstance(value.get("reference"), str):
+            ref_target_type = ref_types.get(value["reference"])
+
         cleaned: dict[str, Any] = {}
         for k, v in value.items():
             if (container_id, k) in protected:
                 cleaned[k] = v
-            elif preserve_fhir_refs and k in ("resourceType", "id", "fullUrl", "reference"):
+                continue
+            if preserve_fhir_refs and k in ("resourceType", "id", "fullUrl", "reference", "system", "code", "status"):
                 cleaned[k] = v
+                continue
+
+            semantic = classify_json_key(parent_key, k, cur_res_type, ref_target_type=ref_target_type)
+            if isinstance(v, str):
+                if not v.strip():
+                    cleaned[k] = v
+                elif semantic in _STRUCTURED_PII_KINDS:
+                    stats.identifiers_detected += 1
+                    cleaned[k] = PLACEHOLDERS[semantic]
+                elif semantic == "PRESERVE_EXACT":
+                    cleaned[k] = v
+                else:
+                    cleaned[k] = clean_text(v, stats)
+            elif isinstance(v, int) and not isinstance(v, bool):
+                # Preserve integer JSON value type while removing numeric PII (e.g. integer Aadhaar/PIN)
+                if semantic in _STRUCTURED_PII_KINDS:
+                    stats.identifiers_detected += 1
+                    cleaned[k] = NUMERIC_REDACTION_SENTINEL
+                else:
+                    cleaned[k] = v
+            elif isinstance(v, (dict, list)):
+                cleaned[k] = _clean_json_values(
+                    v,
+                    stats,
+                    protected,
+                    preserve_fhir_refs=preserve_fhir_refs,
+                    parent_key=k,
+                    resource_type=cur_res_type,
+                    ref_types=ref_types,
+                )
             else:
-                cleaned[k] = _clean_json_values(v, stats, protected, preserve_fhir_refs)
+                cleaned[k] = v
         return cleaned
+
     return value
 
 
@@ -97,25 +158,37 @@ def _process_csv(
     make_psn: Any,
     stats: PipelineStats,
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Process one CSV/TSV file with column classification + slot PSN. O(cells)."""
     assert parsed.rows is not None
     header = parsed.rows[0]
     body = parsed.rows[1:]
     preferred_col = select_csv_slot_column(header, body)
+    col_types = classify_csv_columns(header, body)
     out_rows: list[list[str]] = [list(header)]
     recs: list[dict[str, Any]] = []
 
     for row_idx, row in enumerate(body):
         slot = find_csv_slot(header, row, preferred_col=preferred_col)
-        if slot is not None:
-            col_idx, raw_val = slot
-            psn = make_psn(normalise_slot_value(raw_val))
-            out_row = [
-                psn if idx == col_idx else clean_text(cell, stats)
-                for idx, cell in enumerate(row)
-            ]
-        else:
-            psn = None
-            out_row = [clean_text(cell, stats) for cell in row]
+        slot_col = slot[0] if slot is not None else None
+        psn = make_psn(normalise_slot_value(slot[1])) if slot is not None else None
+
+        out_row: list[str] = []
+        for idx, cell in enumerate(row):
+            if idx == slot_col and psn is not None:
+                out_row.append(psn)
+                continue
+            col_kind = col_types[idx] if idx < len(col_types) else "FREE_TEXT"
+            if col_kind in _STRUCTURED_PII_KINDS:
+                if cell.strip():
+                    stats.identifiers_detected += 1
+                    out_row.append(PLACEHOLDERS[col_kind])
+                else:
+                    out_row.append(cell)
+            elif col_kind == "PRESERVE_EXACT":
+                out_row.append(cell)
+            else:
+                out_row.append(clean_text(cell, stats))
+
         out_rows.append(out_row)
         recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": f"row:{row_idx}", "patient": psn})
         stats.records_processed += 1
@@ -130,6 +203,7 @@ def _process_json(
     make_psn: Any,
     stats: PipelineStats,
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Process one JSON or FHIR Bundle file. O(nodes)."""
     data = parsed.data
     protected: set[tuple[int, str]] = set()
     recs: list[dict[str, Any]] = []
@@ -170,7 +244,8 @@ def _process_json(
                     if psn is not None:
                         stats.records_linked += 1
 
-    cleaned = _clean_json_values(data, stats, protected, preserve_fhir_refs=is_fhir)
+    ref_types = build_fhir_fullurl_map(data) if is_fhir else None
+    cleaned = _clean_json_values(data, stats, protected, preserve_fhir_refs=is_fhir, ref_types=ref_types)
     return serialize_json(cleaned), recs
 
 
@@ -179,6 +254,7 @@ def _process_text(
     make_psn: Any,
     stats: PipelineStats,
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Process one plain-text file preserving line count. O(len(text))."""
     assert parsed.text is not None
     text = parsed.text
     span = find_text_slot_span(text)
@@ -230,12 +306,18 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
                 file_entries.append(entry)
                 continue
 
-            if parsed.kind == "csv":
-                content, file_recs = _process_csv(parsed, make_psn, stats)
-            elif parsed.kind in ("json", "fhir"):
-                content, file_recs = _process_json(parsed, make_psn, stats)
-            else:
-                content, file_recs = _process_text(parsed, make_psn, stats)
+            try:
+                if parsed.kind == "csv":
+                    content, file_recs = _process_csv(parsed, make_psn, stats)
+                elif parsed.kind in ("json", "fhir"):
+                    content, file_recs = _process_json(parsed, make_psn, stats)
+                else:
+                    content, file_recs = _process_text(parsed, make_psn, stats)
+            except (ValueError, UnicodeError, RecursionError):
+                # Fail safe: quarantine with a content-free reason code, never echo raw error text
+                entry.update(output=None, status="quarantined", reason="processing_error")
+                file_entries.append(entry)
+                continue
 
             write_sanitized_text(san_dir / rel_posix, content)
             entry.update(output=f"sanitized/{rel_posix}", status="sanitized")
