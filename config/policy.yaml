@@ -1,0 +1,10 @@
+# Privacy policy rules for Secret Wards (loaded by wards.config.load_policy).
+age_band_years: 5
+age_top_code: 85
+date_shift_max_days: 180
+date_shift_min_abs_days: 7
+location_level: district
+pin_prefix_digits: 3
+min_group_size: 5
+rare_condition_max_profiles: 3
+rare_action: coarsen
