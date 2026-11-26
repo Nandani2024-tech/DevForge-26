@@ -1,6 +1,7 @@
 """End-to-end two-pass firewall pipeline: Pass 1 evidence + R10 linkage -> R5-R13 export."""
 from __future__ import annotations
 
+import codecs
 import json
 import re
 import time
@@ -10,13 +11,20 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from wards.channels import (
+    Base64Format,
     ChannelEvidence,
+    base64_placeholder_encoded,
     build_output_rename_map,
     clean_channel_text,
     clean_csv_header,
     clean_dict_keys,
     clean_path_or_url,
+    decode_base64_payload,
+    decode_printable_utf8,
+    encode_base64_payload,
+    is_binary_magic,
     looks_like_path_or_url,
+    redact_known_names_in_text,
 )
 from wards.columns import (
     build_fhir_fullurl_map,
@@ -27,6 +35,12 @@ from wards.columns import (
     json_dict_key_context,
 )
 from wards.config import (
+    BASE64_BINARY_REASON,
+    BASE64_DEPTH_REASON,
+    BASE64_INVALID_REASON,
+    BASE64_MAX_DEPTH,
+    BASE64_MIN_EXPLICIT_LEN,
+    BASE64_MIN_LEN,
     LOCATION_DETAIL_KINDS,
     NUMERIC_REDACTION_SENTINEL,
     PLACEHOLDERS,
@@ -51,10 +65,10 @@ from wards.generalise import (
     generalise_pin_str,
     generalise_text_qis,
 )
-from wards.ingest import ParsedInput, json_pointer_escape, read_and_parse
+from wards.ingest import ParsedInput, is_json_content, json_pointer_escape, read_and_parse
 from wards.linkage import RecordEvidence, link_records, normalise_name_key, normalise_strong_id
 from wards.names import extract_name_candidates, redact_names
-from wards.patterns import extract_mrn_tokens, find_identifier_spans, redact_identifiers
+from wards.patterns import extract_mrn_tokens, find_identifier_spans, redact_identifiers, split_data_uri_base64
 from wards.pseudo import date_shift_days, pseudonym
 from wards.resources import MemorySampler
 from wards.slots import (
@@ -82,8 +96,105 @@ _STRONG_ID_KINDS = frozenset(
     {"MRN", "AADHAAR", "ABHA", "ABHA_ADDRESS", "PHONE", "PAN", "INSURANCE", "EMAIL"}
 )
 _FHIR_PRESERVE_LEAF_KEYS = frozenset(
-    {"resourceType", "id", "fullUrl", "reference", "system", "code", "status", "url"}
+    {"resourceType", "id", "fullUrl", "reference", "system", "code", "status", "url", "contentType"}
 )
+
+_B64_NONE = 0
+_B64_TEXT = 1
+_B64_JSON = 2
+_B64_REDACT = 3
+
+
+@dataclass(frozen=True)
+class _Base64Inspection:
+    """Single-pass decoded base64 state shared across date voting, Pass 1, and Pass 2."""
+
+    kind: int
+    uri_prefix: str = ""
+    fmt: Base64Format | None = None
+    text: str | None = None
+    json_obj: Any = None
+    reason: str | None = None
+
+
+def _b64_binary_or_depth_reason(b64_depth: int) -> str:
+    """Return depth-limit reason when nesting reached BASE64_MAX_DEPTH, else binary reason. O(1)."""
+    return BASE64_DEPTH_REASON if b64_depth >= BASE64_MAX_DEPTH else BASE64_BINARY_REASON
+
+
+def _inspect_base64_leaf(
+    raw_str: str,
+    *,
+    is_attachment: bool,
+    b64_depth: int,
+) -> _Base64Inspection:
+    """Inspect a JSON string leaf for explicit Attachment/data-URI or plain-JSON base64.
+
+    Complexity: O(len(raw_str)).
+    """
+    uri_parts = split_data_uri_base64(raw_str)
+    if uri_parts is not None:
+        uri_prefix, b64_part = uri_parts
+        explicit_b64 = True
+    else:
+        uri_prefix, b64_part = "", raw_str
+        explicit_b64 = is_attachment
+
+    if not b64_part.strip():
+        return _Base64Inspection(kind=_B64_NONE)
+
+    if explicit_b64:
+        decoded = decode_base64_payload(b64_part, min_len=BASE64_MIN_EXPLICIT_LEN, strict_whitespace=False)
+        if decoded is None:
+            return _Base64Inspection(kind=_B64_REDACT, uri_prefix=uri_prefix, reason=BASE64_INVALID_REASON)
+    else:
+        if len(b64_part) < BASE64_MIN_LEN:
+            return _Base64Inspection(kind=_B64_NONE)
+        decoded = decode_base64_payload(b64_part, min_len=BASE64_MIN_LEN, strict_whitespace=True)
+        if decoded is None:
+            return _Base64Inspection(kind=_B64_NONE)
+
+    raw_bytes = decoded.raw_bytes
+    fmt = decoded.fmt
+    if is_binary_magic(raw_bytes):
+        return _Base64Inspection(
+            kind=_B64_REDACT,
+            uri_prefix=uri_prefix,
+            fmt=fmt,
+            reason=_b64_binary_or_depth_reason(b64_depth),
+        )
+
+    decoded_text = decode_printable_utf8(raw_bytes)
+    if decoded_text is None:
+        if explicit_b64:
+            return _Base64Inspection(
+                kind=_B64_REDACT,
+                uri_prefix=uri_prefix,
+                fmt=fmt,
+                reason=_b64_binary_or_depth_reason(b64_depth),
+            )
+        return _Base64Inspection(kind=_B64_NONE)
+
+    if b64_depth >= BASE64_MAX_DEPTH:
+        return _Base64Inspection(kind=_B64_REDACT, uri_prefix=uri_prefix, fmt=fmt, reason=BASE64_DEPTH_REASON)
+
+    if is_json_content(decoded_text):
+        try:
+            nested = json.loads(decoded_text)
+        except RecursionError:
+            return _Base64Inspection(kind=_B64_REDACT, uri_prefix=uri_prefix, fmt=fmt, reason=BASE64_DEPTH_REASON)
+        except ValueError:
+            nested = None
+        if isinstance(nested, (dict, list)):
+            return _Base64Inspection(
+                kind=_B64_JSON,
+                uri_prefix=uri_prefix,
+                fmt=fmt,
+                text=decoded_text,
+                json_obj=nested,
+            )
+
+    return _Base64Inspection(kind=_B64_TEXT, uri_prefix=uri_prefix, fmt=fmt, text=decoded_text)
 
 
 @dataclass
@@ -157,7 +268,7 @@ def _traverse_json(
     is_fhir: bool,
     ref_types: dict[str, str] | None,
     ref_key: str,
-    on_leaf: Callable[[str, Any, str | None, str | None], Any],
+    on_leaf: Callable[..., Any],
     on_dict_keys: Callable[[list[str], str | None], list[str]] | None = None,
     protected: set[tuple[int, str]] | None = None,
     transform: bool = False,
@@ -177,7 +288,7 @@ def _traverse_json(
             if parent_key
             else "FREE_TEXT"
         )
-        res = on_leaf(semantic, value, parent_key, None)
+        res = on_leaf(semantic, value, parent_key, None, is_attachment=False)
         return res if transform else None
 
     if isinstance(value, list):
@@ -269,7 +380,12 @@ def _traverse_json(
                     ref_target_type=ref_target_type,
                     parent_path=parent_path,
                 )
-            res = on_leaf(semantic, v, parent_key, k)
+            is_attachment = (
+                isinstance(v, str)
+                and k == "data"
+                and (parent_key == "attachment" or "contentType" in value)
+            )
+            res = on_leaf(semantic, v, parent_key, k, is_attachment=is_attachment)
             if cleaned is not None:
                 cleaned[out_k] = res
         return cleaned
@@ -277,13 +393,26 @@ def _traverse_json(
     return value if transform else None
 
 
-def _collect_json_strings(node: Any) -> list[str]:
-    """Collect string leaves from a JSON node for file-level date-order voting. O(nodes)."""
+def _collect_json_strings(node: Any, *, b64_depth: int = 0) -> list[str]:
+    """Collect string leaves (including decoded base64 text/JSON) for date-order voting. O(nodes)."""
     samples: list[str] = []
 
-    def _on_leaf(_sem: str, leaf_val: Any, _pk: str | None, _k: str | None) -> Any:
+    def _on_leaf(
+        _sem: str,
+        leaf_val: Any,
+        _pk: str | None,
+        _k: str | None,
+        *,
+        is_attachment: bool = False,
+    ) -> Any:
         if isinstance(leaf_val, str) and leaf_val.strip():
-            samples.append(leaf_val)
+            insp = _inspect_base64_leaf(leaf_val, is_attachment=is_attachment, b64_depth=b64_depth)
+            if insp.kind == _B64_TEXT and insp.text is not None:
+                samples.append(insp.text)
+            elif insp.kind == _B64_JSON and insp.json_obj is not None:
+                samples.extend(_collect_json_strings(insp.json_obj, b64_depth=b64_depth + 1))
+            elif insp.kind == _B64_NONE:
+                samples.append(leaf_val)
         return leaf_val
 
     _traverse_json(node, is_fhir=False, ref_types=None, ref_key="reference", on_leaf=_on_leaf, transform=False)
@@ -318,60 +447,111 @@ def _harvest_json_record_and_channels(
         if norm is not None:
             strong_set.add(norm)
 
-    def _on_leaf(semantic: str, leaf_val: Any, p_key: str | None, key: str | None) -> Any:
+    def _harvest_free_text(text_val: str) -> None:
         nonlocal dob_iso
-        if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
-            if semantic in _STRONG_ID_KINDS:
-                _add_strong(semantic, str(leaf_val), key)
-            return leaf_val
-        if not isinstance(leaf_val, str) or not leaf_val.strip():
-            return leaf_val
-        if key is None and not p_key:
+        for surf, kind in extract_name_candidates(text_val):
+            evidence.add_name(surf, kind)
+            if kind == "PATIENT_NAME":
+                name_parts.append(surf)
+            else:
+                rel_parts.append(surf)
+        for s, e, kind in find_identifier_spans(text_val):
+            sub = text_val[s:e]
+            if kind == "MRN":
+                evidence.add_mrn(sub)
+            if kind in _STRONG_ID_KINDS:
+                _add_strong(kind, sub)
+            elif kind == "DOB" and dob_iso is None:
+                dob_iso = parse_dob_iso(sub, order=date_order)
+
+    def _walk_harvest(
+        cur_node: Any,
+        *,
+        cur_depth: int,
+        cur_is_fhir: bool,
+        cur_ref_types: dict[str, str] | None,
+        cur_parent_key: str | None,
+        cur_parent_path: tuple[str, ...],
+    ) -> None:
+        def _on_leaf(
+            semantic: str,
+            leaf_val: Any,
+            p_key: str | None,
+            key: str | None,
+            *,
+            is_attachment: bool = False,
+        ) -> Any:
+            nonlocal dob_iso
+            if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
+                if semantic in _STRONG_ID_KINDS:
+                    _add_strong(semantic, str(leaf_val), key)
+                return leaf_val
+            if not isinstance(leaf_val, str) or not leaf_val.strip():
+                return leaf_val
+            if cur_depth == 0 and key is None and not p_key:
+                return leaf_val
+
+            is_data_uri = split_data_uri_base64(leaf_val) is not None
+            explicit_b64 = is_attachment or is_data_uri
+            if explicit_b64 or (semantic == "FREE_TEXT" and not looks_like_path_or_url(leaf_val)):
+                insp = _inspect_base64_leaf(leaf_val, is_attachment=is_attachment, b64_depth=cur_depth)
+                if insp.kind == _B64_JSON and insp.json_obj is not None:
+                    _walk_harvest(
+                        insp.json_obj,
+                        cur_depth=cur_depth + 1,
+                        cur_is_fhir=False,
+                        cur_ref_types=None,
+                        cur_parent_key=None,
+                        cur_parent_path=(),
+                    )
+                    if explicit_b64:
+                        return leaf_val
+                elif insp.kind == _B64_TEXT and insp.text is not None:
+                    _harvest_free_text(insp.text)
+                    if explicit_b64:
+                        return leaf_val
+                elif insp.kind == _B64_REDACT and explicit_b64:
+                    return leaf_val
+
+            if semantic == "PATIENT_NAME":
+                evidence.add_name(leaf_val, semantic)
+                name_parts.append(leaf_val)
+            elif semantic == "RELATIVE":
+                evidence.add_name(leaf_val, semantic)
+                rel_parts.append(leaf_val)
+            elif semantic in _STRONG_ID_KINDS:
+                if semantic == "MRN":
+                    evidence.add_mrn(leaf_val)
+                _add_strong(semantic, leaf_val, key)
+            elif semantic == "DOB":
+                if dob_iso is None:
+                    dob_iso = parse_dob_iso(leaf_val, order=date_order)
+            elif (
+                semantic == "FREE_TEXT"
+                and not looks_like_path_or_url(leaf_val)
+                and (key is None or not is_metadata_key(p_key, key))
+            ):
+                _harvest_free_text(leaf_val)
             return leaf_val
 
-        if semantic == "PATIENT_NAME":
-            evidence.add_name(leaf_val, semantic)
-            name_parts.append(leaf_val)
-        elif semantic == "RELATIVE":
-            evidence.add_name(leaf_val, semantic)
-            rel_parts.append(leaf_val)
-        elif semantic in _STRONG_ID_KINDS:
-            if semantic == "MRN":
-                evidence.add_mrn(leaf_val)
-            _add_strong(semantic, leaf_val, key)
-        elif semantic == "DOB":
-            if dob_iso is None:
-                dob_iso = parse_dob_iso(leaf_val, order=date_order)
-        elif (
-            semantic == "FREE_TEXT"
-            and not looks_like_path_or_url(leaf_val)
-            and (key is None or not is_metadata_key(p_key, key))
-        ):
-            for surf, kind in extract_name_candidates(leaf_val):
-                evidence.add_name(surf, kind)
-                if kind == "PATIENT_NAME":
-                    name_parts.append(surf)
-                else:
-                    rel_parts.append(surf)
-            for s, e, kind in find_identifier_spans(leaf_val):
-                sub = leaf_val[s:e]
-                if kind == "MRN":
-                    evidence.add_mrn(sub)
-                if kind in _STRONG_ID_KINDS:
-                    _add_strong(kind, sub)
-                elif kind == "DOB" and dob_iso is None:
-                    dob_iso = parse_dob_iso(sub, order=date_order)
-        return leaf_val
+        _traverse_json(
+            cur_node,
+            is_fhir=cur_is_fhir,
+            ref_types=cur_ref_types,
+            ref_key="reference",
+            on_leaf=_on_leaf,
+            transform=False,
+            parent_key=cur_parent_key,
+            parent_path=cur_parent_path,
+        )
 
-    _traverse_json(
+    _walk_harvest(
         node,
-        is_fhir=is_fhir,
-        ref_types=ref_types,
-        ref_key="reference",
-        on_leaf=_on_leaf,
-        transform=False,
-        parent_key=parent_key,
-        parent_path=(parent_key,) if parent_key else (),
+        cur_depth=0,
+        cur_is_fhir=is_fhir,
+        cur_ref_types=ref_types,
+        cur_parent_key=parent_key,
+        cur_parent_path=(parent_key,) if parent_key else (),
     )
 
     name_key = normalise_name_key(" ".join(name_parts)) if name_parts else None
@@ -590,19 +770,71 @@ def _clean_json_values(
     preserve_fhir_refs: bool = False,
     ref_types: dict[str, str] | None = None,
     parent_key: str | None = None,
+    b64_depth: int = 0,
+    use_name_evidence: bool = False,
 ) -> Any:
-    """Clean JSON keys, shift dates, generalise QIs, and clean text via shared walker. O(nodes).
+    """Clean JSON keys, shift dates, generalise QIs, and clean text/base64 via shared walker. O(nodes).
 
     parent_key is the input key that holds value when a top-level value is cleaned on its own,
     so its keys and leaves keep their meaning context (R5, R9).
     """
     generalised = False
 
-    def _on_leaf(semantic: str, leaf_val: Any, p_key: str | None, key: str | None) -> Any:
+    def _clean_text_step(text_val: str, *, apply_evidence: bool) -> str:
+        cleaned_txt = clean_text(text_val, stats, offset_days=offset_days, date_order=date_order, policy=policy)
+        if apply_evidence:
+            cleaned_txt, ev_cnt = redact_known_names_in_text(cleaned_txt, evidence)
+            stats.identifiers_detected += ev_cnt
+        return cleaned_txt
+
+    def _clean_b64_leaf(raw_val: str, *, is_attachment: bool) -> tuple[bool, str]:
+        insp = _inspect_base64_leaf(raw_val, is_attachment=is_attachment, b64_depth=b64_depth)
+        if insp.kind == _B64_NONE:
+            return False, raw_val
+        if insp.kind == _B64_REDACT:
+            stats.identifiers_detected += 1
+            if insp.reason is not None:
+                stats.reason_counts[insp.reason] = stats.reason_counts.get(insp.reason, 0) + 1
+            return True, insp.uri_prefix + base64_placeholder_encoded(insp.fmt)
+        if insp.kind == _B64_JSON:
+            cleaned_nested = _clean_json_values(
+                insp.json_obj,
+                stats,
+                set(),
+                evidence,
+                policy,
+                offset_days,
+                date_order,
+                preserve_fhir_refs=False,
+                b64_depth=b64_depth + 1,
+                use_name_evidence=True,
+            )
+            if cleaned_nested == insp.json_obj:
+                return True, raw_val
+            serialized = json.dumps(cleaned_nested, ensure_ascii=False)
+            return True, insp.uri_prefix + encode_base64_payload(codecs.utf_8_encode(serialized)[0], insp.fmt)
+        assert insp.text is not None
+        cleaned_txt = _clean_text_step(insp.text, apply_evidence=True)
+        if cleaned_txt == insp.text:
+            return True, raw_val
+        return True, insp.uri_prefix + encode_base64_payload(codecs.utf_8_encode(cleaned_txt)[0], insp.fmt)
+
+    def _on_leaf(
+        semantic: str,
+        leaf_val: Any,
+        p_key: str | None,
+        key: str | None,
+        *,
+        is_attachment: bool = False,
+    ) -> Any:
         nonlocal generalised
         if isinstance(leaf_val, str):
             if not leaf_val.strip():
                 return leaf_val
+            if is_attachment or split_data_uri_base64(leaf_val) is not None:
+                handled, b64_out = _clean_b64_leaf(leaf_val, is_attachment=is_attachment)
+                if handled:
+                    return b64_out
             if semantic == "DOB":
                 shifted, _ = shift_dates_in_text(
                     leaf_val,
@@ -650,8 +882,11 @@ def _clean_json_values(
             if key is not None and is_metadata_key(p_key, key):
                 c_val, cnt = clean_channel_text(leaf_val, evidence, filename_safe=False)
                 stats.identifiers_detected += cnt
-                return clean_text(c_val, stats, offset_days=offset_days, date_order=date_order, policy=policy)
-            return clean_text(leaf_val, stats, offset_days=offset_days, date_order=date_order, policy=policy)
+                raw_cleaned = _clean_text_step(c_val, apply_evidence=use_name_evidence)
+            else:
+                raw_cleaned = _clean_text_step(leaf_val, apply_evidence=use_name_evidence)
+            handled, b64_out = _clean_b64_leaf(raw_cleaned, is_attachment=False)
+            return b64_out if handled else raw_cleaned
 
         if isinstance(leaf_val, int) and not isinstance(leaf_val, bool):
             if semantic == "AGE":
@@ -685,7 +920,7 @@ def _clean_json_values(
         parent_key=parent_key,
         parent_path=(parent_key,) if parent_key else (),
     )
-    if generalised:
+    if generalised and b64_depth == 0:
         stats.records_generalized += 1
     return result
 
@@ -819,6 +1054,20 @@ def _slot_value(psn: str | None) -> str:
     return psn if psn is not None else PLACEHOLDERS["MRN"]
 
 
+def _claim_json_slot(
+    slot_writer: Callable[..., tuple[int, str] | None],
+    target: Any,
+    psn: str | None,
+    protected: set[tuple[int, str]],
+) -> str | None:
+    """Write PSN (or null-slot placeholder) and return emitted PSN only if a slot holds it (R11). O(1)."""
+    prot = slot_writer(target, _slot_value(psn), allow_name_fallback=psn is not None)
+    if prot is not None:
+        protected.add(prot)
+        return psn
+    return None
+
+
 def _process_json(
     parsed: ParsedInput,
     make_psn: Any,
@@ -844,12 +1093,10 @@ def _process_json(
             if link_map is not None and (parsed.rel_posix, "doc") in link_map
             else (None, 0)
         )
-        prot = write_fhir_slot_psn(data, _slot_value(psn), allow_name_fallback=psn is not None)
-        if prot is not None:
-            protected.add(prot)
-        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": psn})
+        emitted_psn = _claim_json_slot(write_fhir_slot_psn, data, psn, protected)
+        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": emitted_psn})
         stats.records_processed += 1
-        if psn is not None:
+        if emitted_psn is not None:
             stats.records_linked += 1
         cleaned = _clean_json_values(
             data,
@@ -870,12 +1117,10 @@ def _process_json(
             if link_map is not None and (parsed.rel_posix, "doc") in link_map
             else (None, 0)
         )
-        prot = write_json_slot_psn(data, _slot_value(psn), allow_name_fallback=psn is not None)
-        if prot is not None:
-            protected.add(prot)
-        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": psn})
+        emitted_psn = _claim_json_slot(write_json_slot_psn, data, psn, protected)
+        recs.append({"file": f"sanitized/{parsed.rel_posix}", "loc": "doc", "patient": emitted_psn})
         stats.records_processed += 1
-        if psn is not None:
+        if emitted_psn is not None:
             stats.records_linked += 1
         cleaned = _clean_json_values(
             data,
@@ -910,9 +1155,7 @@ def _process_json(
                     else (None, 0)
                 )
                 item_prot: set[tuple[int, str]] = set()
-                prot = write_json_slot_psn(item, _slot_value(psn), allow_name_fallback=psn is not None)
-                if prot is not None:
-                    item_prot.add(prot)
+                emitted_psn = _claim_json_slot(write_json_slot_psn, item, psn, item_prot)
                 cleaned_item = _clean_json_values(
                     item,
                     stats,
@@ -929,11 +1172,11 @@ def _process_json(
                     {
                         "file": f"sanitized/{parsed.rel_posix}",
                         "loc": f"/{escaped_key}/{idx}",
-                        "patient": psn,
+                        "patient": emitted_psn,
                     }
                 )
                 stats.records_processed += 1
-                if psn is not None:
+                if emitted_psn is not None:
                     stats.records_linked += 1
             cleaned_root[out_key] = out_items
         else:
@@ -1215,6 +1458,7 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
         },
         "timing": {"seconds": round(time.monotonic() - t0, 2)},
         "resources": {"peak_rss_mb": peak_rss_mb},
+        "reason_counts": dict(sorted(stats.reason_counts.items())),
     }
     write_report_json(out / "report.json", report)
 

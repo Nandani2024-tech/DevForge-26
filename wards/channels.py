@@ -1,6 +1,9 @@
 """R9 hidden-channel cleaning: filenames/folders, CSV headers, JSON keys, and path/URL metadata."""
 from __future__ import annotations
 
+import base64
+import binascii
+import codecs
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -8,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from wards.config import (
+    BASE64_MAX_WRAP_WIDTH,
+    BASE64_MIN_LEN,
+    BASE64_MIN_PRINTABLE_RATIO,
+    BASE64_PLACEHOLDER,
     CHANNEL_SAFE_WORDS,
     FILENAME_PLACEHOLDERS,
     MIN_CHANNEL_MRN_DIGITS,
@@ -17,7 +24,14 @@ from wards.config import (
     PLACEHOLDERS,
 )
 from wards.names import find_doctor_spans, find_name_spans, nfc_with_offset_map
-from wards.patterns import find_identifier_spans, normalise_digits
+from wards.patterns import (
+    B64_URL_TRANSLATE,
+    B64_WHITESPACE_RE,
+    PROTECTED_TOKEN_RE,
+    find_identifier_spans,
+    match_base64_shape,
+    normalise_digits,
+)
 
 _CHANNEL_BLOCKED_WORDS = frozenset(CHANNEL_SAFE_WORDS) | frozenset(NON_NAME_WORDS) | frozenset(NAME_LABEL_STOP_WORDS)
 
@@ -46,6 +60,7 @@ _EXT_SUFFIX_RE = re.compile(r"^(.+?)(\.[A-Za-z0-9]{1,6})$")
 class ChannelEvidence:
     """Run-time PII evidence collected in Pass 1 (tokens and ID cores only, never raw files)."""
 
+    DEFAULT_KIND = "PATIENT_NAME"
     name_tokens: set[str] = field(default_factory=set)
     name_token_kind: dict[str, str] = field(default_factory=dict)
     name_phrases: set[tuple[str, ...]] = field(default_factory=set)
@@ -142,6 +157,83 @@ def _merge_adjacent_name_spans(text: str, spans: list[tuple[int, int, str]]) -> 
     return merged
 
 
+def _collect_evidence_name_spans(
+    work: str,
+    evidence: ChannelEvidence,
+    protected: bytearray,
+    occupied: bytearray,
+    spans: list[tuple[int, int, str]],
+) -> list[str]:
+    """Scan word tokens against Pass 1 phrases/tokens into spans and return normalised tokens.
+
+    Complexity: O(len(work)).
+    """
+    raw_toks: list[tuple[int, int, str]] = [
+        (m.start(), m.end(), unicodedata.normalize("NFKC", m.group(0)).casefold())
+        for m in _CHANNEL_TOK_RE.finditer(work)
+    ]
+    idx = 0
+    while idx < len(raw_toks):
+        ts, te, tnorm = raw_toks[idx]
+        if any(protected[ts:te]) or any(occupied[ts:te]):
+            idx += 1
+            continue
+
+        matched_phrase = False
+        for plen in (3, 2):
+            if idx + plen <= len(raw_toks):
+                ptup = tuple(raw_toks[idx + j][2] for j in range(plen))
+                if ptup in evidence.name_phrases:
+                    ps = raw_toks[idx][0]
+                    pe = raw_toks[idx + plen - 1][1]
+                    if not any(protected[ps:pe]) and not any(occupied[ps:pe]):
+                        pkind = evidence.name_phrase_kind.get(ptup, evidence.DEFAULT_KIND)
+                        _add_if_free(ps, pe, pkind, protected, occupied, spans)
+                        idx += plen
+                        matched_phrase = True
+                        break
+        if matched_phrase:
+            continue
+
+        if (
+            len(tnorm) >= MIN_CHANNEL_NAME_TOKEN_LEN
+            and not any(ch.isdigit() for ch in tnorm)
+            and tnorm not in _CHANNEL_BLOCKED_WORDS
+            and tnorm in evidence.name_tokens
+        ):
+            kind = evidence.name_token_kind.get(tnorm, evidence.DEFAULT_KIND)
+            _add_if_free(ts, te, kind, protected, occupied, spans)
+        idx += 1
+    return [tok[2] for tok in raw_toks]
+
+
+def _render_redacted_spans(
+    text: str,
+    work: str,
+    spans: list[tuple[int, int, str]],
+    ph_map: dict[str, str],
+    orig_starts: list[int] | None,
+    orig_ends: list[int] | None,
+) -> tuple[str, int]:
+    """Merge adjacent name spans, map NFC offsets back, and splice placeholders. O(len(text))."""
+    spans.sort(key=lambda item: item[0])
+    spans = _merge_adjacent_name_spans(work, spans)
+
+    if orig_starts is not None and orig_ends is not None:
+        mapped = [(orig_starts[s], orig_ends[e - 1], kind) for s, e, kind in spans]
+    else:
+        mapped = spans
+
+    parts: list[str] = []
+    cursor = 0
+    for s, e, kind in mapped:
+        parts.append(text[cursor:s])
+        parts.append(ph_map[kind])
+        cursor = e
+    parts.append(text[cursor:])
+    return "".join(parts), len(mapped)
+
+
 def clean_channel_text(
     text: str,
     evidence: ChannelEvidence,
@@ -186,70 +278,50 @@ def clean_channel_text(
         _add_if_free(s, e, kind, protected, occupied, spans)
 
     # Step 3: Pass 1 evidence tokens & multi-word phrases across separators and camelCase
-    raw_toks: list[tuple[int, int, str]] = [
-        (m.start(), m.end(), unicodedata.normalize("NFKC", m.group(0)).casefold())
-        for m in _CHANNEL_TOK_RE.finditer(work)
-    ]
-    idx = 0
-    while idx < len(raw_toks):
-        ts, te, tnorm = raw_toks[idx]
-        if any(protected[ts:te]) or any(occupied[ts:te]):
-            idx += 1
-            continue
-
-        # Try 3-token and 2-token phrases first (handles short initials like R_K_Bhatia)
-        matched_phrase = False
-        for plen in (3, 2):
-            if idx + plen <= len(raw_toks):
-                ptup = tuple(raw_toks[idx + j][2] for j in range(plen))
-                if ptup in evidence.name_phrases:
-                    ps = raw_toks[idx][0]
-                    pe = raw_toks[idx + plen - 1][1]
-                    if not any(protected[ps:pe]) and not any(occupied[ps:pe]):
-                        pkind = evidence.name_phrase_kind.get(ptup, "PATIENT_NAME")
-                        _add_if_free(ps, pe, pkind, protected, occupied, spans)
-                        idx += plen
-                        matched_phrase = True
-                        break
-        if matched_phrase:
-            continue
-
-        if (
-            len(tnorm) >= MIN_CHANNEL_NAME_TOKEN_LEN
-            and not any(ch.isdigit() for ch in tnorm)
-            and tnorm not in _CHANNEL_BLOCKED_WORDS
-            and tnorm in evidence.name_tokens
-        ):
-            kind = evidence.name_token_kind.get(tnorm, "PATIENT_NAME")
-            _add_if_free(ts, te, kind, protected, occupied, spans)
-        idx += 1
+    norms = _collect_evidence_name_spans(work, evidence, protected, occupied, spans)
 
     # Step 4: Parent-dict context fallback (e.g. "by_name": {"Unknown Canary": ...})
     if not spans and key_context is not None and not any(protected):
-        norms = [tok[2] for tok in raw_toks]
         if norms and not all(w in _CHANNEL_BLOCKED_WORDS for w in norms):
             spans.append((0, n, key_context))
 
     if not spans:
         return text, 0
 
-    spans.sort(key=lambda item: item[0])
-    spans = _merge_adjacent_name_spans(work, spans)
-
-    if orig_starts is not None and orig_ends is not None:
-        mapped = [(orig_starts[s], orig_ends[e - 1], kind) for s, e, kind in spans]
-    else:
-        mapped = spans
-
     ph_map = FILENAME_PLACEHOLDERS if filename_safe else PLACEHOLDERS
-    parts: list[str] = []
-    cursor = 0
-    for s, e, kind in mapped:
-        parts.append(text[cursor:s])
-        parts.append(ph_map[kind])
-        cursor = e
-    parts.append(text[cursor:])
-    return "".join(parts), len(mapped)
+    return _render_redacted_spans(text, work, spans, ph_map, orig_starts, orig_ends)
+
+
+def redact_known_names_in_text(text: str, evidence: ChannelEvidence) -> tuple[str, int]:
+    """Redact Pass 1 patient/relative name phrases & tokens in decoded prose while keeping doctors
+    and placeholders untouched.
+
+    Complexity: O(len(text)).
+    """
+    if not text or (not evidence.name_tokens and not evidence.name_phrases):
+        return text, 0
+
+    is_nfc = unicodedata.is_normalized("NFC", text)
+    if is_nfc:
+        work = text
+        orig_starts: list[int] | None = None
+        orig_ends: list[int] | None = None
+    else:
+        work, orig_starts, orig_ends = nfc_with_offset_map(text)
+
+    n = len(work)
+    protected = bytearray(n)
+    for pm in PROTECTED_TOKEN_RE.finditer(work):
+        protected[pm.start() : pm.end()] = b"\x01" * (pm.end() - pm.start())
+    for ds, de in find_doctor_spans(work, allow_underscores=False):
+        protected[ds:de] = b"\x01" * (de - ds)
+
+    occupied = bytearray(n)
+    spans: list[tuple[int, int, str]] = []
+    _collect_evidence_name_spans(work, evidence, protected, occupied, spans)
+    if not spans:
+        return text, 0
+    return _render_redacted_spans(text, work, spans, PLACEHOLDERS, orig_starts, orig_ends)
 
 
 def _split_stem_ext(segment: str) -> tuple[str, str]:
@@ -434,3 +506,156 @@ def clean_dict_keys(
     if total == 0:
         return list(keys), 0
     return _deduplicate_renamed_labels(keys, cleaned_raw), total
+
+
+_BINARY_MAGIC_PREFIXES = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"%PDF-",
+    b"GIF87a",
+    b"GIF89a",
+    b"PK\x03\x04",
+    b"\x1f\x8b\x08",
+)
+_PLACEHOLDER_BYTES = codecs.utf_8_encode(BASE64_PLACEHOLDER)[0]
+
+
+@dataclass(frozen=True)
+class Base64Format:
+    """Observed base64 wire variant so re-encoding preserves alphabet, padding, and MIME wrap."""
+
+    urlsafe: bool = False
+    padded: bool = True
+    wrap_width: int = 0
+    line_sep: str = ""
+    trailing_sep: str = ""
+
+
+@dataclass(frozen=True)
+class DecodedBase64:
+    """Successfully decoded base64 payload paired with its original wire format."""
+
+    raw_bytes: bytes
+    fmt: Base64Format
+
+
+def _detect_line_wrap(raw_str: str) -> tuple[int, str, str]:
+    """Detect line separator, MIME wrap width, and trailing line ending. O(len(raw_str))."""
+    if "\r\n" in raw_str:
+        line_sep = "\r\n"
+    elif "\n" in raw_str:
+        line_sep = "\n"
+    else:
+        return 0, "", ""
+
+    trailing_sep = line_sep if raw_str.endswith(line_sep) else ""
+    body = raw_str[: -len(trailing_sep)] if trailing_sep else raw_str
+    lines = body.split(line_sep)
+    wrap_width = 0
+    if len(lines) >= 2:
+        first_len = len(lines[0].strip(" \t"))
+        if 1 <= first_len <= BASE64_MAX_WRAP_WIDTH:
+            wrap_width = first_len
+    return wrap_width, line_sep, trailing_sep
+
+
+def decode_base64_payload(
+    raw_str: str,
+    *,
+    min_len: int = BASE64_MIN_LEN,
+    strict_whitespace: bool = True,
+) -> DecodedBase64 | None:
+    """Strictly validate and decode base64 text, capturing variant metadata.
+
+    When strict_whitespace is True (plain-JSON heuristic), only CR/LF MIME line breaks
+    are stripped so prose with spaces never matches. Never echoes input on error.
+    Complexity: O(len(raw_str)).
+    """
+    if not raw_str:
+        return None
+    wrap_width, line_sep, trailing_sep = _detect_line_wrap(raw_str)
+    if strict_whitespace:
+        if " " in raw_str or "\t" in raw_str:
+            return None
+        compact = raw_str.replace("\r", "").replace("\n", "")
+    else:
+        compact = B64_WHITESPACE_RE.sub("", raw_str)
+
+    if len(compact) < min_len:
+        return None
+    shape = match_base64_shape(compact)
+    if shape is None:
+        return None
+    is_urlsafe, had_padding, _ = shape
+
+    rem = len(compact) % 4
+    padded_compact = compact if had_padding else (compact + "=" * ((4 - rem) % 4))
+    std_b64 = padded_compact.translate(B64_URL_TRANSLATE) if is_urlsafe else padded_compact
+    try:
+        raw_bytes = base64.b64decode(std_b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+    padded_flag = had_padding or (len(compact) % 4 == 0)
+    return DecodedBase64(
+        raw_bytes=raw_bytes,
+        fmt=Base64Format(
+            urlsafe=is_urlsafe,
+            padded=padded_flag,
+            wrap_width=wrap_width,
+            line_sep=line_sep,
+            trailing_sep=trailing_sep,
+        ),
+    )
+
+
+def is_binary_magic(raw_bytes: bytes) -> bool:
+    """Return True when raw_bytes starts with a known binary file signature. O(1)."""
+    return raw_bytes.startswith(_BINARY_MAGIC_PREFIXES)
+
+
+def decode_printable_utf8(
+    raw_bytes: bytes,
+    min_printable_ratio: float = BASE64_MIN_PRINTABLE_RATIO,
+) -> str | None:
+    """Decode strict UTF-8 bytes and verify printable text share without control chars.
+
+    Complexity: O(len(raw_bytes)).
+    """
+    try:
+        text, _ = codecs.utf_8_decode(raw_bytes, "strict", True)
+    except UnicodeError:
+        return None
+    if not text:
+        return ""
+    printable = 0
+    for ch in text:
+        code = ord(ch)
+        if (code < 32 and ch not in ("\t", "\n", "\r")) or code == 127:
+            return None
+        if ch in ("\t", "\n", "\r") or ch.isprintable():
+            printable += 1
+    if printable / len(text) < min_printable_ratio:
+        return None
+    return text
+
+
+def encode_base64_payload(raw_bytes: bytes, fmt: Base64Format | None = None) -> str:
+    """Encode raw_bytes to base64 preserving alphabet, padding, and MIME wrap. O(len(raw_bytes))."""
+    eff = fmt if fmt is not None else Base64Format()
+    b64_bytes = base64.urlsafe_b64encode(raw_bytes) if eff.urlsafe else base64.b64encode(raw_bytes)
+    raw_b64, _ = codecs.ascii_decode(b64_bytes, "strict")
+    if not eff.padded:
+        raw_b64 = raw_b64.rstrip("=")
+    if eff.wrap_width > 0 and eff.line_sep:
+        wrapped = eff.line_sep.join(
+            raw_b64[i : i + eff.wrap_width] for i in range(0, len(raw_b64), eff.wrap_width)
+        )
+        return wrapped + eff.trailing_sep
+    return raw_b64 + eff.trailing_sep
+
+
+def base64_placeholder_encoded(fmt: Base64Format | None = None) -> str:
+    """Return valid base64 encoding of BASE64_PLACEHOLDER using fmt (or standard padded). O(1)."""
+    return encode_base64_payload(_PLACEHOLDER_BYTES, fmt)
+

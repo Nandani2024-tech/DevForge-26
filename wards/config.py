@@ -128,6 +128,22 @@ METADATA_PATH_KEY_TOKENS = frozenset(
     }
 )
 
+# R9 base64 channel detection, nesting, and fail-closed redaction constants
+# Arbitrarily short non-attachment strings (<12 chars) are skipped in plain JSON to avoid false positives;
+# explicit attachments and data: URIs decode from >=2 base64 chars regardless of length.
+BASE64_MIN_LEN = 12
+BASE64_MIN_EXPLICIT_LEN = 2
+BASE64_MIN_PRINTABLE_RATIO = 0.85
+BASE64_MAX_DEPTH = 3
+BASE64_MIME_LINE_WIDTH = 76
+BASE64_MAX_WRAP_WIDTH = 256
+DATA_URI_PREFIX = "data:"
+DATA_URI_MIN_LEN = 13
+BASE64_PLACEHOLDER = "[DATA_REDACTED]"
+BASE64_BINARY_REASON = "base64_binary_redacted"
+BASE64_INVALID_REASON = "base64_invalid_redacted"
+BASE64_DEPTH_REASON = "base64_depth_exceeded"
+
 # Generic R7/R8 linguistic constants (never harvested from dev inputs)
 NAME_LABELS = (
     "Patient Name",

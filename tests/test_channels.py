@@ -253,6 +253,18 @@ def test_r9_determinism_privacy_and_failure_no_echo(tmp_path: Path, repo_root: P
     assert "secret_filename_echo" not in json.dumps(res_err.report)
 
 
+def _best_elapsed_seconds(fn, runs: int = 3) -> float:
+    """Measure best-of-N elapsed runtime so transient OS load spikes do not dominate."""
+    best = float("inf")
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        fn()
+        elapsed = time.perf_counter() - t0
+        if elapsed < best:
+            best = elapsed
+    return best
+
+
 def test_r9_channel_cleaner_scales_linearly() -> None:
     ev = ChannelEvidence()
     ev.add_name("Rohan Kulkarni", "PATIENT_NAME")
@@ -263,38 +275,41 @@ def test_r9_channel_cleaner_scales_linearly() -> None:
     timings_text: list[float] = []
     for repeats in (200, 2000, 20000):
         payload = seg * repeats
-        t0 = time.perf_counter()
-        cleaned, cnt = clean_channel_text(payload, ev, filename_safe=True)
-        elapsed = time.perf_counter() - t0
-        assert cnt == 2 * repeats
-        assert "Rohan" not in cleaned and "Dr_Meera_Kulkarni" in cleaned
-        timings_text.append(elapsed)
+
+        def _run_clean() -> None:
+            cleaned, cnt = clean_channel_text(payload, ev, filename_safe=True)
+            assert cnt == 2 * repeats
+            assert "Rohan" not in cleaned and "Dr_Meera_Kulkarni" in cleaned
+
+        timings_text.append(_best_elapsed_seconds(_run_clean))
     assert timings_text[2] <= max(0.2, timings_text[1] * 18.0), timings_text
 
     # 2. All-colliding rename map scaling: 200 -> 2,000 -> 20,000 colliding paths (amortised O(1))
     timings_map: list[float] = []
     for n_files in (200, 2000, 20000):
         paths = [f"Rohan_Kulkarni_UHID-{100000 + i}/report.txt" for i in range(n_files)]
-        t0 = time.perf_counter()
-        rmap = build_output_rename_map(paths, ev)
-        elapsed = time.perf_counter() - t0
-        assert len(set(rmap.values())) == n_files
-        assert rmap[paths[0]] == "PATIENT_NAME_MRN/report.txt"
-        assert rmap[paths[1]] == "PATIENT_NAME_MRN/report_2.txt"
-        timings_map.append(elapsed)
+
+        def _run_map() -> None:
+            rmap = build_output_rename_map(paths, ev)
+            assert len(set(rmap.values())) == n_files
+            assert rmap[paths[0]] == "PATIENT_NAME_MRN/report.txt"
+            assert rmap[paths[1]] == "PATIENT_NAME_MRN/report_2.txt"
+
+        timings_map.append(_best_elapsed_seconds(_run_map))
     assert timings_map[2] <= max(0.3, timings_map[1] * 15.0), timings_map
 
     # 3. All-colliding dict key deduplication scaling: 1,000 -> 10,000 colliding keys (amortised O(1))
     timings_keys: list[float] = []
     for n_keys in (1000, 10000):
         keys = [f"HSP-{100000 + i}" for i in range(n_keys)]
-        t0 = time.perf_counter()
-        cleaned_keys, cnt = clean_dict_keys(keys, ev)
-        elapsed = time.perf_counter() - t0
-        assert cnt == n_keys
-        assert len(set(cleaned_keys)) == n_keys
-        assert cleaned_keys[0] == "[MRN]" and cleaned_keys[1] == "[MRN]_2"
-        timings_keys.append(elapsed)
+
+        def _run_keys() -> None:
+            cleaned_keys, cnt = clean_dict_keys(keys, ev)
+            assert cnt == n_keys
+            assert len(set(cleaned_keys)) == n_keys
+            assert cleaned_keys[0] == "[MRN]" and cleaned_keys[1] == "[MRN]_2"
+
+        timings_keys.append(_best_elapsed_seconds(_run_keys))
     assert timings_keys[1] <= max(0.2, timings_keys[0] * 15.0), timings_keys
 
 

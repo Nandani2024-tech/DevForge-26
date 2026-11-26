@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import re
 
-from wards.config import PIN_DIGITS, PIN_MASK_CHAR, PLACEHOLDERS
+from wards.config import (
+    BASE64_MIN_EXPLICIT_LEN,
+    DATA_URI_MIN_LEN,
+    DATA_URI_PREFIX,
+    PIN_DIGITS,
+    PIN_MASK_CHAR,
+    PLACEHOLDERS,
+)
 
 _DEVA_DIGIT_TRANS = str.maketrans("०१२३४५६७८९", "0123456789")
 
@@ -385,3 +392,45 @@ def classify_value_shape(value: str) -> str | None:
     if _PIN_SHAPE_RE.fullmatch(s):
         return "PIN"
     return None
+
+
+# Precompiled R9 base64 / RFC 2397 data: URI shape patterns (single regex per shape; O(len))
+_DATA_URI_B64_RE = re.compile(r"^(?P<prefix>data:[^,]*;base64,)(?P<body>.*)$", re.IGNORECASE | re.DOTALL)
+B64_WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
+_B64_STD_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_B64_URL_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+B64_URL_TRANSLATE = str.maketrans("-_", "+/")
+
+
+def split_data_uri_base64(value: str) -> tuple[str, str] | None:
+    """Split an RFC 2397 ``data:...;base64,`` URI into (prefix, body), or None. O(len(value))."""
+    if len(value) < DATA_URI_MIN_LEN or not value[: len(DATA_URI_PREFIX)].lower() == DATA_URI_PREFIX:
+        return None
+    m = _DATA_URI_B64_RE.match(value)
+    if m is None:
+        return None
+    return m.group("prefix"), m.group("body")
+
+
+def match_base64_shape(compact: str) -> tuple[bool, bool, bool] | None:
+    """Validate base64 alphabet, length, and padding rules on whitespace-free text.
+
+    Returns ``(is_urlsafe, had_padding, is_std_chars)`` or None when shape/padding is invalid.
+    Complexity: O(len(compact)).
+    """
+    n = len(compact)
+    if n < BASE64_MIN_EXPLICIT_LEN:
+        return None
+    had_padding = compact.endswith("=")
+    if had_padding:
+        if n % 4 != 0:
+            return None
+    elif n % 4 == 1:
+        return None
+
+    if _B64_STD_RE.fullmatch(compact) is not None:
+        return False, had_padding, True
+    if _B64_URL_RE.fullmatch(compact) is not None:
+        return True, had_padding, False
+    return None
+
