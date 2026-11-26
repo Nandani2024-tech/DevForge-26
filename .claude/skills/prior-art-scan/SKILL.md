@@ -14,6 +14,7 @@ Rules:
 - Smoke test (top 3 critical dependencies only): run a minimal check in a temp directory, never in the project repo, max 2 minutes each. Record `smoke: pass / fail / not run`.
 - Reject: stale with no maintenance (about 2 years) unless tiny and stable, unclear license, conflicts with a Hard constraint in `01-ps.md`, setup over 30 minutes, or needs a paid key or quota that could break the live demo (unless the PS provides it).
 - Max 10 candidates. Prefer one well-known library over three obscure ones.
+- Always add one Reuse Stack row for the project's test framework, with R-id `test` (the standard framework for the chosen stack).
 - Do NOT edit `01-ps.md`. Propose changes only.
 
 Sections of `03-prior-art.md`:

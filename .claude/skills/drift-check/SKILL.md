@@ -4,7 +4,7 @@ description: Check, from git and the progress log, whether the work still serves
 disable-model-invocation: true
 ---
 
-Input: `$ARGUMENTS` (optional: a commit range). Default range: the `checked:` hash in `.hackathon/DRIFT.md` to HEAD; if none, the `base:` hash in `PROGRESS.md`; if none, the first commit.
+Input: `$ARGUMENTS` (optional: a commit range). Default range: the `checked:` hash in `.hackathon/DRIFT.md` to HEAD; if `DRIFT.md` does not exist, the first commit (`git rev-list --max-parents=0 HEAD`) to HEAD.
 
 Read ONLY: `.hackathon/01-ps.md`, `04-idea-scope.md` (Decision, spike, MUST/NICE/DROP, targets, Kill list), `PROGRESS.md`, `MISTAKES.md`, `STATE.md`, `DECISIONS.md` (if present), and the previous `DRIFT.md`. Use `git log --oneline --stat <range>` and `git diff --stat <range>`; open diffs only for files you cannot classify from names and messages. Do NOT scan the repo. Do NOT edit anything except `DRIFT.md`, `STATE.md` and `MISTAKES.md` (append only).
 
