@@ -1,47 +1,43 @@
-feat(R5,R8): classify columns by value shape when headers are renamed
+feat(R7,R9): apply run-time name evidence to plain-text documents
 
-Unknown or renamed headers and keys no longer hide PII: a capped
-per-column vote over value shape, address cues, age shape and run-time
-name evidence decides the column, and an ID-shaped column overrides a
-facility-style header only when its values are non-medical and
-high-cardinality. No word lists were added; every rule uses existing
-locked vocabulary or value shape.
+Nursing notes, prescriptions and discharge texts were cleaned by the
+rule-based detectors only, so a name written between a time stamp and
+a clinical clause survived even when the same name was harvested from
+the run's structured files. The Pass 1 name evidence now also runs on
+plain-text documents, inside the same R8 protect mask the rule-based
+detectors use, so doses, wards, doctors and clinical terms stay intact.
 
 Changes:
-- columns: shape/address/age/name-evidence vote, adjacent address-part
-  promotion, per-column ID override with min-values and distinct-count
-  rule, non-patient ID columns found by per-patient variation
-- slots: column slot priorities computed once per file, named slot
-  priority constants, JSON slots use per-key decisions only
-- pipeline: per-column and per-key decisions made before the row and
-  leaf loops in both passes; free-text keys skip address-shape checks
-- patterns, names: medical-value check built on the existing protect
-  mask; strict ID shape without the postal-code kind
-- dates: DD.MM.YYYY dates parsed and shifted with their format kept
-- config: named voting, cardinality and slot-priority constants
-- tests: renamed-header, over-redaction, tie-break, per-column call
-  count and whole-pipeline scaling cases with invented values
+- pipeline: plain-text documents take the run's name evidence as a
+  required input and apply it after the rule-based cleaner
+- channels: evidence redaction skips every R8 protected span; single
+  words only in documents that belong to a patient, full-name phrases
+  elsewhere
+- names: protect mask exported; the health-worker abbreviation stays
+  protected except right after a person label or before a surname
+- tests: nursing-note, protected-span, patient-gate, all-caps label and
+  whole-pipeline text scaling cases with invented names
 
 Verification:
-- tests: 127/127 pass
-- dev: leak 0.4%, canaries 0/4, medical kept 4854/4855, F0.5 0.96,
-  0 wrong merges (unchanged)
-- renamed-header set: MRN 6.4% -> 0.0%, HOUSE 39.7% -> 0.0%, LOCALITY
-  36.9% -> 1.9%, LANDMARK 40.6% -> 0.0%, PATIENT_NAME 3.5% -> 1.8%
-- hardcode-check: WARN (column sample built in 3 places)
-- complexity-audit: PASS (CSV 1k/10k/50k rows 0.20/1.55/12.46 s,
-  linear)
+- tests: 132/132 pass
+- dev: PATIENT_NAME 11/962 -> 0/962, leak 0.4% -> 0.1%, canaries 0/4,
+  medical kept 4854/4855, F0.5 0.96, 0 wrong merges
+- renamed-header set: leak 1.0% -> 0.3%, medical kept 4854/4855
+- hardcode-check: WARN (inline look-back window and word bounds)
+- complexity-audit: PASS (text doc 500/5,000/50,000 lines
+  0.32/2.71/33.58 s, near linear)
 - ui-ux-review: n/a
 
 Replaces:
-- header match short-circuiting the shape vote, and per-value override
-  decisions -> per-column/per-key vote with a cardinality rule: renamed
-  headers leaked IDs and addresses, per-value votes redacted codes
+- rule-only cleaning of plain-text documents -> rules plus run-time
+  name evidence inside the protect mask: 11 full names leaked in notes
 
 Known debt:
-- capped column sample is built separately in 3 places
-- 10k-row CSV is about 1.4x slower than before (more ID columns found)
+- ASHA context rule uses an inline 60-character look-back and word
+  bounds instead of named constants
+- hyphenated-number fragment written twice in names.py
+- text path 1.5x slower at 50,000 lines (21.9 s -> 33.6 s)
 
-Refs: R5, R8, D12, D13, D14
+Refs: R7, R9, D15
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

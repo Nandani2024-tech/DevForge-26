@@ -1,11 +1,9 @@
-# COMPLEXITY | range WORKTREE on fff7ed4 | 2026-11-27 05:45 | verdict PASS
+# COMPLEXITY | range WORKTREE on 357b571 | 2026-11-27 | verdict PASS
 
 function (file:line) | R-id | time | space | target | measured | verdict
-CSV Pass 1 + Pass 2 (pipeline._harvest_parsed_evidence, _process_csv) | R5,R20 | O(cap*C + R*C): per-column decisions once before the row loop | O(cap*C) | O(bytes) per file; dev < 20 s | 4-col CSV 1k/10k/50k rows: 0.20/1.55/12.46 s (74d4590: 0.21/1.10/8.78 s); linear; previous round 3.38/29.67/146.6 s | meets
-resolve_preserve_exact_override (columns.py) | R5 | O(cells) | O(cells) | per column, not per row | call count equal at 50 and 2,000 rows (test_r5_r20_column_decisions_are_made_once_per_column_not_per_row) | meets
-classify_csv_columns, csv_slot_priorities, find_non_patient_mrn_cols | R5 | O(min(R,cap)*C) | O(cap*C) | O(bytes) | included above | meets
-whole pipeline scale test | R5,R20 | - | - | ratio bounds | 500/2,000/8,000 rows within 1.6x of linear (test_r5_r20_whole_pipeline_csv_scales_linearly) | meets
-dev run | R20 | - | - | < 20 s | 2.5 s (check_submission) | meets
+_process_text + redact_known_names_in_text (pipeline.py, channels.py) | R7,R9,R20 | O(len(text)): one protect mask + one token scan per segment | O(len(text)) | O(bytes) per file | text doc 500/5,000/50,000 lines: 0.32/2.71/33.58 s (357b571: 0.26/2.43/21.9 s); growth x8.5 / x12.4 per 10x | meets (1.5x slower at 50k lines)
+build_protect_mask ASHA branch (names.py) | R7,R8 | O(60) look-back per ASHA match, bounded | O(1) | linear | included above | meets
+dev run | R20 | - | - | < 20 s, < 512 MB | 2.09 s, 25.7 MB (report.json) | meets
+whole-pipeline text scale test | R7,R9 | - | - | ratio bounds | test_r7_r9_whole_pipeline_plain_text_scales_linearly passes | meets
 
-Note: 10k rows cost about 1.4x 74d4590; the cProfile shows the extra spread over the normal cleaners (more columns now detected as IDs), no per-row re-vote.
-Not verified: peak RSS at 50k rows; collect_list_preserve_overrides runs up to 3x per JSON list (O(cap) each, not measured separately).
+Not verified: peak RSS at 50k lines; the x12.4 step at 50k lines (slightly above linear) was not profiled.

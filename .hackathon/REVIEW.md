@@ -1,8 +1,8 @@
-# REVIEW (hardcode-check) | range WORKTREE on fff7ed4 | 2026-11-27 05:45 | verdict WARN
+# REVIEW (hardcode-check) | range WORKTREE on 357b571 | 2026-11-27 | verdict WARN
 
 id | file:line | check | snippet | why | root-cause fix | severity
-H1 | wards/slots.py csv_slot_priorities, wards/pipeline.py:618, wards/columns.py classify_csv_columns | H | `[row[i].strip() for row in sampled ... if i < len(row) and row[i].strip()]` | the capped column sample is built separately in 3 places | one helper (e.g. columns.sample_column_values) computed once per file and passed to each decision | WARN
+H1 | wards/names.py build_protect_mask (ASHA branch), _LABEL_TRAILING_WORDS_RE, _NEXT_CAP_TOK_RE | G | `text[max(0, m.start() - 60) : ...]`, `{0,3}`, `{1,30}` | look-back window and word/letter bounds inline at the call site (MISTAKES "constants added at the call site") | named constants in wards/config.py, regexes built from them | WARN
+H2 | wards/names.py _HYPHEN_DIGITS_RE | H | `^\d+-\d+-\d+$` | repeats the `\d+-\d+-\d+` fragment already inside _FAST_PROTECT_RE | name the fragment once and build both from it (or a named group) | WARN
 
-Resolved since the last review: per-leaf single-value votes removed (decided once per key/column, COLUMN_ID_MIN_VALUES); inline "PIN" comparison, slot priorities 0/2 and "MRN" replaced by include_pin / SLOT_PRIORITY_* / PRIMARY_ID_TYPE; "div" special case removed; _FAST_PROTECT_RE restored unchanged (reviewed words keep their owner); HOSPITAL_ID_ISSUER_WORDS and HOUSE_ABBR_WORDS gone (D13). No new word lists; tests/vocab_lock.json, tests/r22_vocab_allowlist.txt and the R22 guard tests unchanged; no new dependencies.
-Fixture edits made in review (user-approved): invented name replaces a dev name; MRN-shaped mixed-column value expected redacted; JSON facility fixture extended to the CSV's 6 rows; new tie-break test.
-Not verified: Python 3.10/3.12; the sample cap (first 200 rows) on files whose PII starts later.
+Checked: no new word lists (vocab lock, allowlist and R22 guard tests unchanged, ratchet passes); no dependency change; evidence is a required argument of _process_text (no optional-default evidence); no swallowed exceptions; ASHA handling is a context rule (person label before it, or a capitalised non-stop token after it), not a dev word.
+Not verified: Python 3.10/3.12; behaviour of the ASHA context rule on Devanagari labels.

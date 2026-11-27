@@ -125,3 +125,12 @@
 - Obsolete: single-value resolve_id_slot_override calls in pipeline.py and slots.py (removed)
 - Lesson: a decision about a column is never made from one of its values
 ~~~
+~~~
+### D15 | 2026-11-27 | R7,R9,R8 | run-time name evidence on plain-text documents, inside the R8 protect mask
+- Was: _process_text cleaned .txt documents with clean_text only; redact_known_names_in_text (D4 evidence) protected only placeholders and doctors; ASHA always protected (commit 357b571)
+- Now: _process_text takes the Pass 1 ChannelEvidence (required) and applies redact_known_names_in_text after clean_text; that function skips every build_protect_mask span; single-token evidence only in documents with a patient (active PSN), multi-token phrases elsewhere; ASHA stays protected except right after a person label or before a capitalised non-stop token
+- Why: 11 full names left in nursing notes/prescriptions (−11 penalty); dev PATIENT_NAME 11/962 -> 0/962, leak 0.4% -> 0.1%, medical kept 4854/4855 unchanged; mutated leak 1.0% -> 0.3%; tests 132/132; a simulation without the mask and the patient gate lost a protected term on dev and a clean-document term on the mutated set
+- Trigger: ship
+- Obsolete: the local PROTECTED_TOKEN_RE + doctor-span mask in redact_known_names_in_text (replaced by build_protect_mask)
+- Lesson: run-time evidence is safe in prose only inside the same protect mask the rule-based detectors use
+~~~

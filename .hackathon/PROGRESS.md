@@ -1,5 +1,5 @@
 # PROGRESS
-base: d15a3c6
+base: 49bf4f9
 
 R-id | priority | status | evidence
 R1 | MUST | done-verified | validate_output CONTRACT OK, 0 WARN (test_kit_contract)
@@ -7,9 +7,9 @@ R2 | MUST | done-verified | check_dev RAW COPIES 0; exit 0; quarantine edge test
 R3 | MUST | done-verified | row/column/key-path/line diff vs input = 0 except PII-only renames (test_kit_contract)
 R5 | MUST | done-verified | @ d15a3c6: dev PATIENT_NAME 1.1%, PHONE/MRN/AADHAAR/DOB/VILLAGE/PIN 0.0%; renamed-header set (tools/mutate_dev.py) PATIENT_NAME 1.8%, MRN/AADHAAR/DOB/PHONE/VILLAGE/PIN 0.0% (all <= 2%)
 R6 | MUST | done-verified | check_dev @ 74d4590: every R6 type 0.0% (PHONE 0/308, MRN 0/850); medical kept 4854/4855; generated-ID invariants 12/12 (tests/test_redaction_invariants.py)
-R7 | MUST | done-verified | check_dev @ 74d4590: latin 0.4%, deva 0.0%, hinglish 0.0%; CANARIES 0 of 4
+R7 | MUST | done-verified | check_dev @ 49bf4f9: PATIENT_NAME 0/962, RELATIVE 0/232, latin 0.1%, deva 0.0%, hinglish 0.0%; CANARIES 0 of 4; renamed set hinglish 0.9%
 R8 | MUST | done-verified | MEDICAL DATA KEPT 4854/4855 (100.0%); R8 oracles pass
-R9 | MUST | done-verified | check_dev @ 74d4590: content 0.4%, filename/base64/metadata/key/header 0.0%
+R9 | MUST | done-verified | check_dev @ 49bf4f9: content 0.1%, filename/base64/metadata/key/header 0.0%; plain-text documents now get run-time name evidence (D15)
 R10 | MUST | done-verified | check_dev precision 1.00, recall 0.84, F0.5 0.96, wrong merges 0
 R11 | MUST | done-verified | 681/681 non-null claims found in their record; check_submission "different secret -> different output"
 R12 | MUST | done-verified | 339/339 multi-date records keep exact intervals; 0 shifts outside policy (tests/test_acceptance_r11_r13.py); 31/48 patients share one offset (rest unlinked, per-record fallback)
@@ -26,8 +26,8 @@ R4 | NICE | partial | 19/19 sanitized bundles parse with fhir.resources R4B, 0 u
 R14, R18, R24, R25 | NICE | not started | -
 
 Honest progress: MUST 15/19 done-verified (79%); NICE 0/6 (0%).
-Time: 17h26m since first commit (2026-11-26 11:42 -> 2026-11-27 05:08).
-Health: churn 0.04 overall (714 deleted / 16560 added), 0.09 this range (109 / 1155); 0 reverts; open issues 4; hardcode-check WARN @ d15a3c6 (non-blocking).
+Time: 18h06m since first commit (2026-11-26 11:42 -> 2026-11-27 05:48).
+Health: churn 0.04 overall (739 deleted / 16754 added), 0.13 this range (25 / 194); 0 reverts; open issues 4; hardcode-check WARN @ 49bf4f9 (non-blocking).
 Verdict: on track - R5 holds on renamed headers (every R5 type <= 2%) with dev numbers unchanged; R16/R17/R20/R23 unverified stand between the build and the V0 gate.
 
 ### scaffold | R1 R2 R3 R15 R16 R19 R20 R21 R23 | 2026-11-26 | commits 21ffd7e..21ffd7e
@@ -115,3 +115,13 @@ Verdict: on track - R5 holds on renamed headers (every R5 type <= 2%) with dev n
 - Time: 3 verify rounds (2 blocked: over-redaction, word lists, per-value vote + 25x slowdown), committed 05:08
 - Shortcuts / debt: capped column sample built in 3 places (hardcode WARN); 10k-row CSV 1.55 s vs 1.10 s before (more ID columns found)
 - Open issues: renamed set RELATIVE_NAME 6.0% (hinglish 12.6%) in forwarded-message texts (R7/N1); R16 kill-test, R17 TMP/HOME grep, R20 network-off/Linux, R23 README model section
+
+### text-evidence (fix #2) | R7 R9 | 2026-11-27 | commits 357b571..49bf4f9
+- Built: Pass 1 name evidence applied to plain-text documents inside the R8 protect mask; single-word evidence only in patient-owned documents; context rule for the health-worker abbreviation
+- Evidence: tests 132/132; dev PATIENT_NAME 11/962 -> 0/962, leak 0.4% -> 0.1%, canaries 0/4, medical 4854/4855, F0.5 0.96, 0 wrong merges; renamed set leak 1.0% -> 0.3%; CONTRACT OK; READY TO SUBMIT
+- Reverted / removed: none
+- Rewritten after earlier logging: wards/channels.py (34 lines), wards/names.py (39), wards/pipeline.py (20)
+- Unplanned work: none
+- Time: one verify round, committed 05:48
+- Shortcuts / debt: inline 60-char look-back and word bounds in the ASHA rule (hardcode WARN); hyphenated-number fragment written twice; text path 1.5x slower at 50k lines
+- Open issues: discharge "Ward n" LOCALITY 2/103 (fix #9); names inside FHIR base64 on the renamed set (D-f); R16/R17/R20/R23 unverified
