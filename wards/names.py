@@ -52,23 +52,29 @@ _HINGLISH_MKR_ALT = "|".join(re.escape(m) for m in HINGLISH_SUBJECT_MARKERS)
 # Protect-mask patterns (R8): run first so medical facts, doctors, and placeholders stay untouched
 _FAST_PROTECT_RE = re.compile(
     PROTECTED_TOKEN_RE.pattern + "|"
-    r"(?i:\b(?:Ward|Bed|Department)[ \t]*(?:\([^)\n\r]+\)|of[ \t]+[A-Za-z]+|\d+)?\b)|\bASHA\b|"
+    r"(?i:\b(?:Ward|Bed|Department)[ \t]*(?:\([^)\n\r]+\)|of[ \t]+[A-Za-z]+|\d+)?\b)|(?P<asha>\bASHA\b)|"
     r"(?i:\b\d+(?:\.\d+)?[ \t]*(?:mg|mcg|ug|gm?|kg|ml|dl|l|iu|units?|mmhg|bpm|meq|mmol|/ul|/dl|/l|%)\b|"
     r"\b\d+-\d+-\d+\b|\b(?:BP|Pulse|Temp|SpO2|RBS|Hb|HbA1c|TLC|WBC|Plt)[ \t:]*\d+(?:[./]\d+)?\b)"
 )
+_HYPHEN_DIGITS_RE = re.compile(r"^\d+-\d+-\d+$")
 
 
 def is_r8_medical_value(value: str) -> bool:
     """True if a value carries an R8 dose, unit, frequency, vital or ward pattern. O(len(value)).
 
-    Built on the protect mask; a PSN/placeholder match alone is not medical evidence.
+    Built on the protect mask; PSN/placeholder and bare hyphenated numeric tokens alone are excluded.
     """
     s = value.strip()
     if not s:
         return False
     if has_unit_or_frequency(s):
         return True
-    return any(PROTECTED_TOKEN_RE.fullmatch(m.group()) is None for m in _FAST_PROTECT_RE.finditer(s))
+    return any(
+        m.group("asha") is None
+        and PROTECTED_TOKEN_RE.fullmatch(m.group()) is None
+        and _HYPHEN_DIGITS_RE.fullmatch(m.group()) is None
+        for m in _FAST_PROTECT_RE.finditer(s)
+    )
 
 
 _KCO_HO_START_RE = re.compile(
@@ -126,6 +132,8 @@ _INLINE_PROSE_LABEL_RE = re.compile(
 _REL_CODE_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?P<marker>[SDWC][ \t]*/[ \t]*[Oo]|[SDW]\.o\.?)[ \t]*:?[ \t]*"
 )
+_LABEL_TRAILING_WORDS_RE = re.compile(r"^(?:[A-Za-z'.-]+[ \t]+){0,3}$")
+_NEXT_CAP_TOK_RE = re.compile(r"[ \t]+([A-Z][A-Za-z']{1,30})\b")
 _PRE_REL_NAME_RE = re.compile(
     rf"(?P<name>{_CAP_OR_DEVA}(?:[ \t]+{_CAP_OR_DEVA}){{0,3}})"
     r"(?:[ \t]*,[ \t]*|[ \t]+)$"
@@ -275,7 +283,7 @@ def _extract_name_prefix_span(
     return start_offset, end_pos
 
 
-def _build_protect_mask(text: str) -> bytearray:
+def build_protect_mask(text: str) -> bytearray:
     """Mark R8 clinical/doctor/eponym/dose spans that must never be redacted as names.
 
     Complexity: O(len(text)).
@@ -286,9 +294,24 @@ def _build_protect_mask(text: str) -> bytearray:
         if s < e:
             protected[s:e] = b"\x01" * (e - s)
 
-    for rx in (_FAST_PROTECT_RE, _DOCTOR_PROTECT_RE):
-        for m in rx.finditer(text):
-            _mark(m.start(), m.end())
+    for m in _FAST_PROTECT_RE.finditer(text):
+        if m.group("asha") is not None:
+            # Protect the community health-worker role ("ASHA worker", "by ASHA"), not a person's given name
+            line_prefix = text[max(0, m.start() - 60) : m.start()].rsplit("\n", 1)[-1]
+            in_person_label = any(
+                _LABEL_TRAILING_WORDS_RE.match(line_prefix[lm.end() :]) is not None
+                for rx in (_ANY_LABEL_RE, _REL_CODE_RE)
+                for lm in rx.finditer(line_prefix)
+            )
+            if in_person_label:
+                continue
+            nxt_m = _NEXT_CAP_TOK_RE.match(text, m.end())
+            if nxt_m is not None and _clean_word_key(nxt_m.group(1)) not in NON_NAME_WORDS:
+                continue
+        _mark(m.start(), m.end())
+
+    for m in _DOCTOR_PROTECT_RE.finditer(text):
+        _mark(m.start(), m.end())
 
     # K/C/O and H/O protect only the clinical term list immediately following the marker (bounded window)
     for m in _KCO_HO_START_RE.finditer(text):
@@ -311,7 +334,7 @@ def _build_protect_mask(text: str) -> bytearray:
 
 def _collect_name_spans(text: str) -> list[tuple[int, int, str]]:
     """Collect non-overlapping R7 name spans in O(len(text)) time."""
-    protected = _build_protect_mask(text)
+    protected = build_protect_mask(text)
     occupied = bytearray(len(text))
     spans: list[tuple[int, int, str]] = []
     has_deva = bool(_HAS_DEVA_RE.search(text))

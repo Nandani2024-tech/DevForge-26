@@ -1289,18 +1289,30 @@ def _process_text(
     parsed: ParsedInput,
     make_psn: Any,
     stats: PipelineStats,
+    evidence: ChannelEvidence,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Process one plain-text file preserving line count, PSN placement, R12 shifts, and R13 QIs."""
+    """Process one plain-text file preserving line count, PSN placement, Pass 1 names, R12 shifts, and R13 QIs."""
     assert parsed.text is not None
     text = parsed.text
     psn = stats.active_psn
+    allow_single = psn is not None
     span = find_text_slot_span(text)
+
+    def _clean_segment(segment: str) -> str:
+        cleaned = clean_text(segment, stats)
+        cleaned, ev_cnt = redact_known_names_in_text(
+            cleaned,
+            evidence,
+            allow_single_tokens=allow_single,
+        )
+        stats.identifiers_detected += ev_cnt
+        return cleaned
 
     if span is not None:
         start, end, _ = span
-        sanitized_text = clean_text(text[:start], stats) + _slot_value(psn) + clean_text(text[end:], stats)
+        sanitized_text = _clean_segment(text[:start]) + _slot_value(psn) + _clean_segment(text[end:])
     else:
-        sanitized_text = clean_text(text, stats)
+        sanitized_text = _clean_segment(text)
         if psn is not None:
             sanitized_text = inject_psn_into_text(sanitized_text, psn)
 
@@ -1502,7 +1514,7 @@ def run_pipeline(inp: Path, out: Path, secret: bytes, policy: Policy) -> Pipelin
                     stats.active_psn = psn
                     stats.active_offset = offset_days
                     stats.active_date_order = text_date_orders[rel_posix]
-                    content, file_recs = _process_text(parsed, _make_psn_unused, stats)
+                    content, file_recs = _process_text(parsed, _make_psn_unused, stats, evidence)
             except (ValueError, UnicodeError, RecursionError):
                 file_entries.append(
                     {

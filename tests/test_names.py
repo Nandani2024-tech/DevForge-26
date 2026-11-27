@@ -1,10 +1,15 @@
 """Tests for R7 free-text name detection (Latin/Devanagari/Hinglish) and R8 medical preservation."""
 from __future__ import annotations
 
+import json
 import time
 import unicodedata
+from pathlib import Path
 
+from wards.channels import ChannelEvidence, redact_known_names_in_text
+from wards.config import PLACEHOLDERS, load_policy
 from wards.names import redact_names
+from wards.pipeline import run_pipeline
 
 
 def test_r7_label_relation_and_honorific_oracles() -> None:
@@ -154,3 +159,122 @@ def test_r7_single_long_line_scales_linearly() -> None:
     small = run(300)
     large = run(3000)
     assert large <= max(0.5, small * 20.0), (small, large)
+
+
+def test_r7_r9_nursing_note_uses_pass1_evidence_keeps_lines(tmp_path: Path) -> None:
+    # Invented full name absent from dev/input: structured CSV feeds Pass 1 evidence,
+    # unlabelled timestamped nursing note gets redacted while preserving line count and K/C/O.
+    inp = tmp_path / "in"
+    out = tmp_path / "out"
+    inp.mkdir()
+    (inp / "patients.csv").write_text(
+        "uhid,patient_name,dob\nZPQ-77101,Tarunesh Vadhwal,14-05-1988\n",
+        encoding="utf-8",
+    )
+    note_in = (
+        "UHID: ZPQ-77101\n"
+        "08:30 - Tarunesh Vadhwal - K/C/O Hypothyroidism\n"
+        "09:15 - Vitals stable, 650mg given.\n"
+    )
+    (inp / "nursing_note.txt").write_text(note_in, encoding="utf-8")
+
+    run_pipeline(inp, out, b"r7-r9-note-secret", load_policy())
+    note_out = (out / "sanitized" / "nursing_note.txt").read_text(encoding="utf-8")
+    assert len(note_out.splitlines()) == len(note_in.splitlines())
+    assert "Tarunesh" not in note_out and "Vadhwal" not in note_out
+    assert PLACEHOLDERS["PATIENT_NAME"] in note_out
+    assert "K/C/O Hypothyroidism" in note_out
+    assert "650mg" in note_out
+
+
+def test_r7_r9_protected_r8_span_word_stays_byte_identical(tmp_path: Path) -> None:
+    # Even when a harvested given token matches a protected word (e.g. "Bed", "Parkinson"),
+    # R8-protected spans (Bed 12, Parkinson's disease, Dr. ...) stay byte-identical.
+    ev = ChannelEvidence()
+    ev.add_name("Parkinson Kulkarni", "PATIENT_NAME")
+    ev.name_tokens.add("bed")
+    text = "Bed 12: Parkinson Kulkarni has Parkinson's disease; Dr. Kulkarni seen 650mg.\n"
+    cleaned, _ = redact_known_names_in_text(text, ev, allow_single_tokens=True)
+    assert "Bed 12:" in cleaned
+    assert "Parkinson's disease" in cleaned
+    assert "Dr. Kulkarni" in cleaned
+    assert "650mg" in cleaned
+    assert f"{PLACEHOLDERS['PATIENT_NAME']} has Parkinson's disease" in cleaned
+
+
+def test_r7_r9_single_token_requires_active_patient_psn(tmp_path: Path) -> None:
+    # A patient-free document (no PSN) only redacts multi-token name phrases, never single tokens.
+    inp = tmp_path / "in"
+    out = tmp_path / "out"
+    inp.mkdir()
+    (inp / "roster.json").write_text(
+        json.dumps({"patient_ref": "ZPQ-77102", "patient_name": "Zoravar Sengupta"}),
+        encoding="utf-8",
+    )
+    (inp / "ref_single.txt").write_text(
+        "Summary of clinical protocol reviewed by Zoravar committee on sepsis.\n",
+        encoding="utf-8",
+    )
+    (inp / "ref_full.txt").write_text(
+        "Unlinked circular mentioning Zoravar Sengupta in ward notice.\n",
+        encoding="utf-8",
+    )
+
+    run_pipeline(inp, out, b"r7-r9-single-gate", load_policy())
+    out_single = (out / "sanitized" / "ref_single.txt").read_text(encoding="utf-8")
+    out_full = (out / "sanitized" / "ref_full.txt").read_text(encoding="utf-8")
+    assert "Zoravar" in out_single  # single token NOT touched when document has no patient PSN
+    assert "Zoravar" not in out_full and "Sengupta" not in out_full
+    assert PLACEHOLDERS["PATIENT_NAME"] in out_full
+
+
+def test_r7_r9_all_caps_name_and_asha_protect_context() -> None:
+    # All-caps "Name: ASHA THIROVAR" and "Name: DEVESH MENON" redact; community health-worker role stays.
+    rx_caps = "Name: ASHA THIROVAR\nTab PCM 650mg BD\nReferred by ASHA worker.\n"
+    cleaned_asha, cnt_asha = redact_names(rx_caps)
+    assert cnt_asha >= 1
+    assert "ASHA THIROVAR" not in cleaned_asha and "THIROVAR" not in cleaned_asha
+    assert f"Name: {PLACEHOLDERS['PATIENT_NAME']}" in cleaned_asha
+    assert "Referred by ASHA worker." in cleaned_asha
+
+    rx_other = "Name: DEVESH MENON\nAge: 42 / M\n"
+    cleaned_other, cnt_other = redact_names(rx_other)
+    assert cnt_other == 1
+    assert "DEVESH" not in cleaned_other and "MENON" not in cleaned_other
+    assert f"Name: {PLACEHOLDERS['PATIENT_NAME']}" in cleaned_other
+
+
+def test_r7_r9_whole_pipeline_plain_text_scales_linearly(tmp_path: Path) -> None:
+    def _best_time(fn, runs: int = 3) -> float:
+        best = float("inf")
+        for _ in range(runs):
+            t0 = time.perf_counter()
+            fn()
+            elapsed = time.perf_counter() - t0
+            if elapsed < best:
+                best = elapsed
+        return best
+
+    timings: list[float] = []
+    for n_lines in (200, 1000, 5000):
+        case_dir = tmp_path / f"case_{n_lines}"
+        inp = case_dir / "in"
+        out = case_dir / "out"
+        inp.mkdir(parents=True)
+        (inp / "roster.csv").write_text(
+            "uhid,patient_name\nZPQ-88001,Zoravar Sengupta\nZPQ-88002,Mrinalini Goswami\n",
+            encoding="utf-8",
+        )
+        line = "08:30 - Zoravar Sengupta - K/C/O HTN; Bed 4, Tab 650mg, Dr. Anil Mehta\n"
+        (inp / "notes.txt").write_text("UHID: ZPQ-88001\n" + line * n_lines, encoding="utf-8")
+
+        def _run() -> None:
+            run_pipeline(inp, out, b"r7-r9-scale-secret", load_policy())
+
+        timings.append(_best_time(_run))
+        san_txt = (out / "sanitized" / "notes.txt").read_text(encoding="utf-8")
+        assert "Zoravar" not in san_txt and "Sengupta" not in san_txt
+        assert "Dr. Anil Mehta" in san_txt and "650mg" in san_txt
+
+    # 25x input lines (200 -> 5000): linear stays far below quadratic (25^2 = 625x).
+    assert timings[2] <= max(0.3, timings[0] * 40.0), timings

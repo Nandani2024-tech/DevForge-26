@@ -74,7 +74,7 @@ def test_cleaning_error_quarantines_without_echoing_message(tmp_path: Path, monk
     secret_surface = "SENSITIVE_SURFACE_9988776655"
     (inp / "note.txt").write_text(f"Note: {secret_surface}\n", encoding="utf-8")
 
-    def boom(_parsed, _make_psn, _stats):
+    def boom(_parsed, _make_psn, _stats, _evidence):
         raise ValueError(f"failed near {secret_surface}")
 
     monkeypatch.setattr(pipeline, "_process_text", boom)

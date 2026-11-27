@@ -23,7 +23,7 @@ from wards.config import (
     NON_NAME_WORDS,
     PLACEHOLDERS,
 )
-from wards.names import find_doctor_spans, find_name_spans, nfc_with_offset_map
+from wards.names import build_protect_mask, find_doctor_spans, find_name_spans, nfc_with_offset_map
 from wards.patterns import (
     B64_URL_TRANSLATE,
     B64_WHITESPACE_RE,
@@ -163,6 +163,8 @@ def _collect_evidence_name_spans(
     protected: bytearray,
     occupied: bytearray,
     spans: list[tuple[int, int, str]],
+    *,
+    allow_single_tokens: bool = True,
 ) -> list[str]:
     """Scan word tokens against Pass 1 phrases/tokens into spans and return normalised tokens.
 
@@ -196,7 +198,8 @@ def _collect_evidence_name_spans(
             continue
 
         if (
-            len(tnorm) >= MIN_CHANNEL_NAME_TOKEN_LEN
+            allow_single_tokens
+            and len(tnorm) >= MIN_CHANNEL_NAME_TOKEN_LEN
             and not any(ch.isdigit() for ch in tnorm)
             and tnorm not in _CHANNEL_BLOCKED_WORDS
             and tnorm in evidence.name_tokens
@@ -292,9 +295,14 @@ def clean_channel_text(
     return _render_redacted_spans(text, work, spans, ph_map, orig_starts, orig_ends)
 
 
-def redact_known_names_in_text(text: str, evidence: ChannelEvidence) -> tuple[str, int]:
-    """Redact Pass 1 patient/relative name phrases & tokens in decoded prose while keeping doctors
-    and placeholders untouched.
+def redact_known_names_in_text(
+    text: str,
+    evidence: ChannelEvidence,
+    *,
+    allow_single_tokens: bool = True,
+) -> tuple[str, int]:
+    """Redact Pass 1 patient/relative name phrases & tokens in free/decoded prose while keeping R8
+    protected spans (doctors, doses, K/C/O, Ward/Bed, eponyms) and placeholders untouched.
 
     Complexity: O(len(text)).
     """
@@ -310,15 +318,17 @@ def redact_known_names_in_text(text: str, evidence: ChannelEvidence) -> tuple[st
         work, orig_starts, orig_ends = nfc_with_offset_map(text)
 
     n = len(work)
-    protected = bytearray(n)
-    for pm in PROTECTED_TOKEN_RE.finditer(work):
-        protected[pm.start() : pm.end()] = b"\x01" * (pm.end() - pm.start())
-    for ds, de in find_doctor_spans(work, allow_underscores=False):
-        protected[ds:de] = b"\x01" * (de - ds)
-
+    protected = build_protect_mask(work)
     occupied = bytearray(n)
     spans: list[tuple[int, int, str]] = []
-    _collect_evidence_name_spans(work, evidence, protected, occupied, spans)
+    _collect_evidence_name_spans(
+        work,
+        evidence,
+        protected,
+        occupied,
+        spans,
+        allow_single_tokens=allow_single_tokens,
+    )
     if not spans:
         return text, 0
     return _render_redacted_spans(text, work, spans, PLACEHOLDERS, orig_starts, orig_ends)
